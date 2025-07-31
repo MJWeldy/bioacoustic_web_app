@@ -1,0 +1,111 @@
+{
+  "test_config": {
+    "description": "Test configuration for bioacoustics web application",
+    "audio_files": [
+      {
+        "filename": "2024-07-10_07_31.wav",
+        "duration_seconds": 61.22,
+        "sample_rate": 32000,
+        "channels": 1,
+        "file_size_mb": 3.92,
+        "expected_species": ["bird_song", "background"],
+        "notes": "Morning recording with potential bird vocalizations"
+      },
+      {
+        "filename": "2024-07-10_07_45.wav", 
+        "duration_seconds": 56.44,
+        "sample_rate": 32000,
+        "channels": 1,
+        "file_size_mb": 3.61,
+        "expected_species": ["bird_song", "background"],
+        "notes": "Later morning recording, different time segment"
+      }
+    ],
+    "class_maps": {
+      "simple_binary": {
+        "bird_song": 0,
+        "background": 1
+      },
+      "multiclass_example": {
+        "NOWA_song": 0,
+        "CEWA": 1, 
+        "WIWA": 2,
+        "background": 3
+      },
+      "detailed_classification": {
+        "songbird_song": 0,
+        "songbird_call": 1,
+        "raptor_call": 2,
+        "waterfowl": 3,
+        "insect": 4,
+        "mammal": 5,
+        "background": 6,
+        "noise": 7
+      }
+    },
+    "backend_models": [
+      "BirdNET_2.4",
+      "PERCH",
+      "PNWCnet",
+      "PNWCnet_EXPANDED"
+    ],
+    "test_scenarios": {
+      "quick_test": {
+        "description": "Fast validation of core functionality",
+        "duration_minutes": 5,
+        "class_map": "simple_binary",
+        "backend_model": "BirdNET_2.4",
+        "annotation_count": 5
+      },
+      "full_workflow": {
+        "description": "Complete dataset creation to model training",
+        "duration_minutes": 30,
+        "class_map": "multiclass_example", 
+        "backend_model": "BirdNET_2.4",
+        "annotation_count": 20,
+        "include_training": true
+      },
+      "stress_test": {
+        "description": "High-load concurrent operations",
+        "duration_minutes": 10,
+        "concurrent_requests": 10,
+        "class_map": "detailed_classification",
+        "backend_model": "PERCH"
+      }
+    },
+    "expected_outputs": {
+      "dataset_files": [
+        "test_dataset.parquet",
+        "test_dataset_embeddings.npy",
+        "test_dataset_metadata.json"
+      ],
+      "annotation_export": [
+        "exported_clips/",
+        "exported_clips/metadata.json",
+        "exported_clips/*.wav"
+      ],
+      "training_outputs": [
+        "trained_model.keras",
+        "training_history.json",
+        "evaluation_metrics.json"
+      ]
+    },
+    "performance_benchmarks": {
+      "dataset_creation": {
+        "max_time_minutes": 5,
+        "max_memory_gb": 2
+      },
+      "spectrogram_generation": {
+        "max_time_seconds": 3,
+        "max_concurrent": 5
+      },
+      "audio_streaming": {
+        "max_latency_ms": 500,
+        "throughput_mbps": 10
+      },
+      "annotation_response": {
+        "max_time_ms": 200
+      }
+    }
+  }
+}

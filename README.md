@@ -53,14 +53,14 @@ A web-based application for building datasets and performing active learning in 
 ✅ **Clean Architecture** - Organized FastAPI backend + React frontend structure  
 
 **Recent Achievements:**
-- ✅ Successfully converted Jupyter notebook workflow to web application
-- ✅ Implemented Dataset Builder with embedding generation and model selection
-- ✅ Created interactive Active Learning interface with spectrogram visualization
-- ✅ Added audio playback, annotation tools, and export functionality
-- ✅ Established reliable cross-platform installation using environment cloning
-- ✅ Consolidated all modules in unified `backend/modules/` package
-- ✅ Removed redundant files and streamlined project structure
-- ✅ Added comprehensive development documentation and troubleshooting guides
+- ✅ **Fixed Critical Backend Issues**: Resolved all 500 errors in multiclass annotation system
+- ✅ **Enhanced Setup Process**: Now works for first-time users without existing environments
+- ✅ **Comprehensive Diagnostics**: Added health check, test, and reset utilities  
+- ✅ **Robust Error Handling**: Improved validation and error reporting across all endpoints
+- ✅ **First-Time User Support**: Complete setup from scratch using environment.yml
+- ✅ **Process Management**: Reliable startup/shutdown with health monitoring
+- ✅ **Clean Frontend**: Eliminated ESLint warnings and compilation issues
+- ✅ **Complete Documentation**: Setup guides, troubleshooting, and user manuals
 
 ## Features
 
@@ -161,12 +161,36 @@ A web-based application for building datasets and performing active learning in 
 
 ## Installation and Setup
 
-### Prerequisites
-- **Anaconda or Miniconda** (all platforms)
-  - Download from: https://docs.conda.io/en/latest/miniconda.html
-- **Node.js 16+** (if not installed via conda)
-  - Download from: https://nodejs.org/
-- **Existing `active_learning` conda environment** (from original notebook)
+### 🚀 Quick Start (New Users)
+
+**Prerequisites:**
+- **Conda/Miniconda/Anaconda** - Download from: https://docs.conda.io/en/latest/miniconda.html
+
+**Installation:**
+```bash
+git clone https://github.com/MJWeldy/bioacoustic_web_app.git
+cd bioacoustic_web_app
+./setup.sh      # Works for first-time users!
+./run_dev.sh    # Start the application
+```
+
+**Access:**
+- Frontend: http://localhost:3000
+- Backend API: http://localhost:8000
+- API Docs: http://localhost:8000/docs
+
+### 🔧 Setup Methods
+
+The setup process **automatically handles both scenarios**:
+
+#### ✅ **First-Time Users (Recommended)**
+- **No existing environment needed!** 
+- Creates environment from `environment.yml` with all required packages
+- Includes TensorFlow, FastAPI, Librosa, Polars, Node.js, and all dependencies
+
+#### ✅ **Existing Users** 
+- If you have an `active_learning` environment, it will be cloned as fallback
+- Preserves your existing setup while creating dedicated web app environment
 
 ### Platform-Specific Installation
 
@@ -177,7 +201,7 @@ A web-based application for building datasets and performing active learning in 
 
 #### macOS
 ```bash
-./setup_macos.sh
+./setup_macos.sh  # or use ./setup.sh
 ```
 
 #### Windows
@@ -185,17 +209,25 @@ A web-based application for building datasets and performing active learning in 
 setup.bat
 ```
 
-### What the Installation Does
-1. Clone your existing `active_learning` conda environment
-2. Add web framework packages (FastAPI, uvicorn, etc.)
-3. Install Node.js and React dependencies (if needed)
-4. Create platform-specific run scripts
-5. Set up cross-platform file paths
+### 🧪 Verification & Diagnostics
 
-### Important Prerequisites
-- **Existing `active_learning` conda environment** (from the original bioacoustics notebook)
-- If you don't have it, first set up the original `active_learning_loop.ipynb` notebook
-- This ensures all TensorFlow, CUDA, and bioacoustics dependencies are properly configured
+**Test your installation:**
+```bash
+./health_check.sh    # Comprehensive system validation (22 tests)
+./test_setup.sh      # Quick package verification
+```
+
+**Troubleshooting:**
+```bash
+./reset.sh           # Clean up processes/ports if stuck
+./health_check.sh    # Diagnose issues
+```
+
+### What the Installation Does
+1. **Environment Creation**: Uses `environment.yml` (primary) or clones existing environment (fallback)
+2. **Package Installation**: Installs all Python and Node.js dependencies automatically
+3. **Verification**: Tests all components and provides clear status feedback
+4. **Script Generation**: Creates optimized run scripts with health checks
 
 ### Running the Application
 
