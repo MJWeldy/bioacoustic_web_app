@@ -81,13 +81,24 @@ check_target_env() {
     fi
 }
 
-# Function to create environment using environment.yml with fallback to cloning
+# Function to create environment using macOS-specific environment file with fallbacks
 create_environment() {
     echo "Creating bioacoustics-web-app environment..."
     
     init_conda
     
-    # First try to create from environment.yml
+    # First try macOS-specific environment file
+    if [ -f "environment_macos.yml" ]; then
+        echo "Attempting to create environment from environment_macos.yml (macOS optimized)..."
+        if conda env create -f environment_macos.yml; then
+            echo "✓ Environment created from environment_macos.yml"
+            return 0
+        else
+            echo "⚠️  macOS-specific environment creation failed, trying standard environment.yml..."
+        fi
+    fi
+    
+    # Fallback to standard environment.yml
     echo "Attempting to create environment from environment.yml..."
     if conda env create -f environment.yml; then
         echo "✓ Environment created from environment.yml"
@@ -104,15 +115,23 @@ create_environment() {
                 echo "✓ Environment cloned successfully (fallback method)"
                 return 0
             else
-                echo "Error: Both environment.yml and cloning methods failed"
+                echo "Error: All environment creation methods failed"
                 exit 1
             fi
         else
-            echo "Error: Environment creation from environment.yml failed and no active_learning environment to clone from"
-            echo "Please either:"
-            echo "1. Fix conda package conflicts and try running setup_macos.sh again"
-            echo "2. Install conda packages manually"
-            echo "3. Set up an active_learning environment first, then re-run setup_macos.sh"
+            echo "Error: All environment creation methods failed"
+            echo ""
+            echo "Troubleshooting options for macOS:"
+            echo "1. Try manual installation (see below)"
+            echo "2. Check conda channels: conda config --show channels"
+            echo "3. Update conda: conda update conda"
+            echo "4. Try mamba instead: conda install mamba -c conda-forge"
+            echo ""
+            echo "Manual installation commands:"
+            echo "  conda create -n bioacoustics-web-app python=3.10 -y"
+            echo "  conda activate bioacoustics-web-app"
+            echo "  conda install -c conda-forge librosa numpy scipy pandas scikit-learn matplotlib nodejs -y"
+            echo "  pip install soundfile polars tensorflow fastapi uvicorn[standard] python-multipart pydantic"
             exit 1
         fi
     fi

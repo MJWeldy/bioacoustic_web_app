@@ -11,27 +11,30 @@ dependencies:
   - numpy>=1.24.0
   - scipy>=1.10.0
   - pandas>=2.0.0
-  - polars>=0.20.0
   
-  # Audio processing
+  # Audio processing (core conda packages)
   - librosa>=0.10.0
-  - soundfile>=0.12.0
   - audioread>=3.0.0
   - ffmpeg
   
-  # Machine learning
+  # Machine learning (conda packages)
   - scikit-learn>=1.3.0
   - matplotlib>=3.7.0
   
   # Web framework and utilities
   - requests>=2.31.0
   
-  # Node.js for React frontend (platform dependent)
+  # Node.js for React frontend
   - nodejs>=18
   
-  # pip dependencies (packages better installed via pip)
+  # pip dependencies (packages that work better via pip, especially on macOS)
   - pip:
-    # Machine learning frameworks
+    # Audio processing (pip is more reliable on macOS and Apple Silicon)
+    - soundfile>=0.12.0
+    - polars>=0.20.0
+    - soxr>=0.3.0
+    
+    # Machine learning frameworks (pip is more reliable for TensorFlow)
     - tensorflow>=2.13.0,<2.20.0
     - tensorflow-hub>=0.14.0
     
@@ -40,9 +43,6 @@ dependencies:
     - uvicorn[standard]>=0.24.0
     - python-multipart>=0.0.6
     - pydantic>=2.5.0,<3.0.0
-    
-    # Additional audio processing
-    - soxr>=0.3.0
     
     # Development and testing (optional)
     - pytest>=7.0.0
