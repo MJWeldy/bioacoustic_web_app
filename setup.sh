@@ -1,11 +1,10 @@
 #!/bin/bash
 
-# Script to set up the web app by cloning the existing active_learning environment
-# This preserves the original environment while creating a dedicated web app environment
+# Script to set up the Bioacoustics Web App
+# Works for both first-time users and users with existing active_learning environment
 
 echo "==================================="
 echo "Setting up Bioacoustics Web App"
-echo "Cloning active_learning environment"
 echo "==================================="
 
 # Function to check conda initialization
@@ -26,14 +25,15 @@ init_conda() {
     fi
 }
 
-# Function to check if active_learning environment exists
+# Function to check if active_learning environment exists (optional for cloning)
 check_source_env() {
-    if ! conda env list | grep -q "active_learning"; then
-        echo "Error: active_learning environment not found"
-        echo "Please run the original notebook setup first, or try ./install-fallback.sh"
-        exit 1
+    if conda env list | grep -q "active_learning"; then
+        echo "✓ Found existing active_learning environment"
+        return 0
+    else
+        echo "ℹ️  No active_learning environment found (will use environment.yml)"
+        return 1
     fi
-    echo "✓ Found active_learning environment"
 }
 
 # Function to check if target environment already exists
@@ -64,26 +64,26 @@ create_environment() {
         echo "✓ Environment created from environment.yml"
         return 0
     else
-        echo "⚠️  Environment creation from yml failed, falling back to cloning approach..."
+        echo "⚠️  Environment creation from environment.yml failed"
         
-        # Check if active_learning environment exists
-        if ! conda env list | grep -q "active_learning"; then
-            echo "Error: active_learning environment not found and environment.yml failed"
-            echo "Please either:"
-            echo "1. Fix conda package issues and try again"
-            echo "2. Set up the original active_learning environment first"
-            exit 1
-        fi
-        
-        # Clone the environment as fallback
-        echo "Cloning active_learning environment to bioacoustics-web-app..."
-        conda create --name bioacoustics-web-app --clone active_learning
-        
-        if [ $? -eq 0 ]; then
-            echo "✓ Environment cloned successfully (fallback method)"
-            return 0
+        # Check if active_learning environment exists for cloning fallback
+        if conda env list | grep -q "active_learning"; then
+            echo "Falling back to cloning active_learning environment..."
+            conda create --name bioacoustics-web-app --clone active_learning
+            
+            if [ $? -eq 0 ]; then
+                echo "✓ Environment cloned successfully (fallback method)"
+                return 0
+            else
+                echo "Error: Both environment.yml and cloning methods failed"
+                exit 1
+            fi
         else
-            echo "Error: Both environment.yml and cloning methods failed"
+            echo "Error: Environment creation from environment.yml failed and no active_learning environment to clone from"
+            echo "Please either:"
+            echo "1. Fix conda package conflicts and try running setup.sh again"
+            echo "2. Install conda packages manually"
+            echo "3. Set up an active_learning environment first, then re-run setup.sh"
             exit 1
         fi
     fi
@@ -211,9 +211,23 @@ echo "Backend started with PID: $BACKEND_PID"
 # Wait for backend to start
 sleep 3
 
+# Check and install frontend dependencies if needed
+echo "Checking frontend dependencies..."
+cd ../frontend
+if [ ! -d "node_modules" ] || [ ! -f "node_modules/.package-lock.json" ]; then
+    echo "Frontend dependencies not found. Installing..."
+    npm install
+    if [ $? -ne 0 ]; then
+        echo "Failed to install frontend dependencies"
+        exit 1
+    fi
+    echo "✓ Frontend dependencies installed"
+else
+    echo "✓ Frontend dependencies found"
+fi
+
 # Start frontend
 echo "Starting React frontend..."
-cd ../frontend
 npm start > ../logs/frontend.log 2>&1 &
 FRONTEND_PID=$!
 echo "Frontend started with PID: $FRONTEND_PID"
@@ -239,9 +253,10 @@ EOF
 
 # Main setup
 main() {
-    check_source_env
+    init_conda
+    check_source_env  # This just provides info now, doesn't exit
     check_target_env
-    clone_environment
+    create_environment
     install_missing_packages
     check_nodejs
     install_react

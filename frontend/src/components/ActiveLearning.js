@@ -15,7 +15,6 @@ const ActiveLearning = ({ isActive = true }) => {
   const [clips, setClips] = useState([]);
   const [currentClipIndex, setCurrentClipIndex] = useState(0);
   const [spectrogram, setSpectrogram] = useState(null);
-  const [stats, setStats] = useState(null);
   const [datasetMetadata, setDatasetMetadata] = useState(null);
   const [availableClasses, setAvailableClasses] = useState([]);
   const [selectedClass, setSelectedClass] = useState(null);
@@ -394,12 +393,14 @@ const ActiveLearning = ({ isActive = true }) => {
     if (currentClip && colorMode) {
       loadClip(currentClip);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [colorMode]);
 
   useEffect(() => {
     if (isDatasetLoaded) {
       getClips();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scoreRange]);
 
   return (

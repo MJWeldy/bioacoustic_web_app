@@ -442,7 +442,7 @@ async def select_class(class_index: int):
     
     num_classes = len(app_state["class_map"])
     if class_index < 0 or class_index >= num_classes:
-        raise HTTPException(status_code=400, detail=f"Class index {class_index} out of range")
+        raise HTTPException(status_code=400, detail=f"Class index {class_index} out of range (0-{num_classes-1})")
     
     try:
         # Update the database to show scores and annotations for the selected class
@@ -918,7 +918,6 @@ async def annotate_clip(request: AnnotationRequest):
 @app.post("/api/active-learning/annotate-other-classes")
 async def annotate_other_classes_as_absent(request: AnnotationRequest):
     """Mark all other classes (except current) as 'not present' for a clip"""
-    print(f"DEBUG: Received annotate-other-classes request - clip_id: {request.clip_id}, annotation: {request.annotation}")
     if app_state["audio_db"] is None:
         raise HTTPException(status_code=400, detail="No dataset loaded")
     
@@ -941,6 +940,12 @@ async def annotate_other_classes_as_absent(request: AnnotationRequest):
         
         current_class_index = app_state.get("current_class_index", 0)
         num_classes = len(app_state.get("class_map", {}))
+        
+        # Check if required columns exist
+        required_columns = ['annotation_status', 'label_strength']
+        missing_columns = [col for col in required_columns if col not in app_state["audio_db"].df.columns]
+        if missing_columns:
+            raise HTTPException(status_code=500, detail=f"Database missing required columns: {missing_columns}")
         
         # Mark all other classes as "not present" (0)
         classes_updated = 0

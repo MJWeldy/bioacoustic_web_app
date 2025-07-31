@@ -307,8 +307,8 @@ class Audio_DB:
           # Check if the specific class has a strong label (value = 1)
           return self.df['label_strength'].list.get(class_index) == 1
       else:
-          # Check if any class has a strong label
-          return self.df['label_strength'].list.eval(pl.element().sum()) > 0
+          # Check if any class has a strong label (sum > 0 means at least one class has strong label)
+          return self.df['label_strength'].list.eval(pl.element().sum() > 0)
   
   def get_weak_labels_mask(self, class_index: int = None):
       """
@@ -326,8 +326,8 @@ class Audio_DB:
           # Check if the specific class has a weak label (value = 0)
           return self.df['label_strength'].list.get(class_index) == 0
       else:
-          # Check if all classes have weak labels
-          return self.df['label_strength'].list.eval(pl.element().sum()) == 0
+          # Check if all classes have weak labels (sum == 0 means all classes are weak)
+          return self.df['label_strength'].list.eval(pl.element().sum() == 0)
   
   def get_label_statistics(self):
       """
@@ -338,19 +338,30 @@ class Audio_DB:
       """
       total_clips = len(self.df)
       
+      def safe_count_true(mask):
+          """Helper to count True values in a mask, handling different data types"""
+          try:
+              return int(mask.sum())
+          except:
+              return mask.to_list().count(True)
+      
       # Count clips with strong labels (any class)
       strong_mask = self.get_strong_labels_mask()
-      strong_clips = strong_mask.sum()
+      strong_clips = safe_count_true(strong_mask)
       
       # Count clips with only weak labels (all classes)
       weak_mask = self.get_weak_labels_mask()
-      weak_clips = weak_mask.sum()
+      weak_clips = safe_count_true(weak_mask)
       
       # Per-class statistics
       class_stats = {}
       for i in range(self.num_classes):
-          class_strong = self.get_strong_labels_mask(i).sum()
-          class_weak = self.get_weak_labels_mask(i).sum()
+          strong_mask_i = self.get_strong_labels_mask(i)
+          weak_mask_i = self.get_weak_labels_mask(i)
+          
+          class_strong = safe_count_true(strong_mask_i)
+          class_weak = safe_count_true(weak_mask_i)
+          
           class_stats[f"class_{i}"] = {
               "strong_labels": class_strong,
               "weak_labels": class_weak
