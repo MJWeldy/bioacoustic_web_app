@@ -163,7 +163,7 @@ def get_label(CLASS_MAP, FILE_PATH):
             tmp[CLASS_MAP[key]] = 1
     return tmp
 
-def get_label_with_strength(CLASS_MAP, FILE_PATH, metadata=None):
+def get_label_with_strength(CLASS_MAP, FILE_PATH, metadata=None, weak_neg_weight=0.05):
     """
     Enhanced label extraction that includes label strength information.
     Prioritizes metadata over filename parsing for accuracy.
@@ -182,39 +182,116 @@ def get_label_with_strength(CLASS_MAP, FILE_PATH, metadata=None):
     # Initialize arrays
     num_classes = len(set(CLASS_MAP.values()))
     labels = np.zeros(num_classes)
-    label_strength = np.zeros(num_classes)  # 0 = weak, 1 = strong
+    
+    # Check if this file is from strong_annotations folder
+    is_strong_annotations = 'strong_annotations' in FILE_PATH
+    default_strength = 1.0 if is_strong_annotations else weak_neg_weight
+    
+    label_strength = np.full(num_classes, default_strength)  # Default based on folder
     
     filename = os.path.basename(FILE_PATH)
     
+    print(f"DEBUG: File path: {FILE_PATH}")
+    print(f"DEBUG: Is strong annotations: {is_strong_annotations}")
+    print(f"DEBUG: Default strength: {default_strength}")
+    
     # PRIORITY 1: Get info from metadata if available (most accurate)
     if metadata and 'clips' in metadata:
-        for clip_info in metadata['clips']:
+        print(f"DEBUG: Looking for filename '{filename}' in metadata with {len(metadata['clips'])} clips")
+        for i, clip_info in enumerate(metadata['clips']):
+            clip_filename = clip_info.get('filename', 'no_filename')
+            print(f"DEBUG: Clip {i}: metadata filename='{clip_filename}', target='{filename}', match={clip_filename == filename}")
             if clip_info['filename'] == filename:
-                # Found metadata for this clip - use binary vectors directly
-                metadata_labels = clip_info.get('labels', [])
-                metadata_strengths = clip_info.get('label_strengths', [])
+                print(f"DEBUG: Found match! Processing clip metadata...")
                 
-                # Map from metadata class indices to current CLASS_MAP indices
-                # Use metadata class_map if available, otherwise assume same ordering
-                metadata_class_map = metadata.get('class_map', CLASS_MAP)
+                # Check for new binary vector format first
+                if 'labels' in clip_info and 'label_strengths' in clip_info:
+                    # New format - use binary vectors directly
+                    metadata_labels = clip_info.get('labels', [])
+                    metadata_strengths = clip_info.get('label_strengths', [])
+                    
+                    print(f"DEBUG: Using binary vector format - Labels: {metadata_labels}, Strengths: {metadata_strengths}")
+                    
+                    # Map from metadata class indices to current CLASS_MAP indices
+                    metadata_class_map = metadata.get('class_map', CLASS_MAP)
+                    
+                    for meta_class_name, meta_class_idx in metadata_class_map.items():
+                        if meta_class_name in CLASS_MAP:
+                            current_class_idx = CLASS_MAP[meta_class_name]
+                            
+                            # Copy label and strength if within bounds
+                            if meta_class_idx < len(metadata_labels):
+                                labels[current_class_idx] = metadata_labels[meta_class_idx]
+                            if meta_class_idx < len(metadata_strengths):
+                                label_strength[current_class_idx] = metadata_strengths[meta_class_idx]
                 
-                # Create mapping from metadata indices to current indices
-                for meta_class_name, meta_class_idx in metadata_class_map.items():
-                    if meta_class_name in CLASS_MAP:
-                        current_class_idx = CLASS_MAP[meta_class_name]
+                else:
+                    # Legacy format - convert from annotations dictionary
+                    annotations = clip_info.get('annotations', {})
+                    print(f"DEBUG: Using legacy format - Annotations: {annotations}")
+                    print(f"DEBUG: CLASS_MAP: {CLASS_MAP}")
+                    
+                    # Process each annotation
+                    for class_name, annotation_value in annotations.items():
+                        print(f"DEBUG: Processing class '{class_name}' with value '{annotation_value}'")
+                        print(f"DEBUG: Class '{class_name}' in CLASS_MAP: {class_name in CLASS_MAP}")
                         
-                        # Copy label and strength if within bounds
-                        if meta_class_idx < len(metadata_labels):
-                            labels[current_class_idx] = metadata_labels[meta_class_idx]
-                        if meta_class_idx < len(metadata_strengths):
-                            label_strength[current_class_idx] = metadata_strengths[meta_class_idx]
+                        if class_name in CLASS_MAP:
+                            current_class_idx = CLASS_MAP[class_name]
+                            print(f"DEBUG: Mapping to index {current_class_idx}")
+                            
+                            # Convert annotation values to binary labels
+                            if annotation_value == "present":
+                                labels[current_class_idx] = 1
+                                label_strength[current_class_idx] = 1.0  # Always strong for present
+                                print(f"DEBUG: Set labels[{current_class_idx}] = 1 (strong positive)")
+                            elif annotation_value in ["not_present", "not present"]:
+                                labels[current_class_idx] = 0
+                                label_strength[current_class_idx] = 1.0  # Always strong for explicit negatives
+                                print(f"DEBUG: Set labels[{current_class_idx}] = 0 (strong negative)")
+                            elif annotation_value == "uncertain":
+                                labels[current_class_idx] = 0  # Treat uncertain as negative for training
+                                # Uncertain strength depends on whether it's in strong_annotations folder
+                                uncertain_strength = 1.0 if is_strong_annotations else weak_neg_weight
+                                label_strength[current_class_idx] = uncertain_strength
+                                print(f"DEBUG: Set labels[{current_class_idx}] = 0 (uncertain, strength={uncertain_strength})")
+                        else:
+                            print(f"DEBUG: Class '{class_name}' NOT FOUND in CLASS_MAP!")
                 
+                print(f"DEBUG: Final mapped labels: {labels}, strengths: {label_strength}")
                 return labels, label_strength
+        
+        print(f"DEBUG: No metadata match found for '{filename}', falling back to filename parsing")
     
-    # PRIORITY 2: Parse from filename (only strong labels)
-    # Expected format: originalname_clipstart-annotation_slug-strong.wav
-    if '-strong.wav' in filename:
-        # Extract class information from filename (strong labels only)
+    # PRIORITY 2: Parse from filename format: Site_001_Rep_C_165.0-YRWA_song_1+BRMA_call_1.wav
+    if '-' in filename and '.wav' in filename:
+        # Extract the class part after the last -
+        parts = filename.split('-')
+        if len(parts) >= 2:
+            # Get the class part (everything after last - but before .wav)
+            class_part = parts[-1].replace('.wav', '')
+            
+            if class_part == "empty":
+                # This is a negative example - all classes are 0 (strong negatives)
+                for class_idx in CLASS_MAP.values():
+                    labels[class_idx] = 0
+                    label_strength[class_idx] = 1  # Strong negative
+            else:
+                # Parse positive class names (multiple classes separated by +)
+                class_names = class_part.split('+')
+                for class_name in class_names:
+                    if class_name in CLASS_MAP:
+                        class_idx = CLASS_MAP[class_name]
+                        labels[class_idx] = 1
+                        label_strength[class_idx] = 1  # Strong positive
+                
+                # Set other classes as strong negatives
+                for class_name, class_idx in CLASS_MAP.items():
+                    if class_name not in class_names:
+                        labels[class_idx] = 0
+                        label_strength[class_idx] = 1  # Strong negative
+    elif '-strong.wav' in filename:
+        # Legacy format with -strong suffix
         for class_name, class_idx in CLASS_MAP.items():
             if class_name in filename:
                 labels[class_idx] = 1
@@ -232,6 +309,84 @@ def get_label_with_strength(CLASS_MAP, FILE_PATH, metadata=None):
     
     return labels, label_strength
 
+def load_strong_annotations_from_filenames(folder_path, class_map):
+    """
+    Load training data from strong_annotations subfolder using filename-based parsing.
+    Expected filename format: originalname_clipstart-classname1+classname2.wav
+    
+    Args:
+        folder_path: Path to strong_annotations folder
+        class_map: Dictionary mapping class names to indices
+        
+    Returns:
+        tuple: (file_paths, labels, label_strengths, metadata)
+    """
+    import os
+    import glob
+    
+    # Find all wav files in strong_annotations folder
+    wav_files = glob.glob(os.path.join(folder_path, "*.wav"))
+    
+    if not wav_files:
+        raise ValueError(f"No WAV files found in {folder_path}")
+    
+    file_paths = []
+    all_labels = []
+    all_label_strengths = []
+    
+    num_classes = len(set(class_map.values()))
+    
+    for file_path in wav_files:
+        filename = os.path.basename(file_path)
+        
+        # Initialize arrays for this file
+        labels = np.zeros(num_classes)
+        label_strength = np.ones(num_classes)  # All strong annotations
+        
+        # Parse filename to extract class names
+        # Format: originalname_clipstart-classname1+classname2.wav
+        if '.wav' in filename:
+            # Extract the class part after the last -
+            parts = filename.split('-')
+            if len(parts) >= 2:
+                # Get the class part (everything after last - but before .wav)
+                class_part = parts[-1].replace('.wav', '')
+                
+                if class_part == "empty":
+                    # This is a negative example - all classes are 0 (strong negatives)
+                    pass  # labels already initialized to zeros
+                else:
+                    # Parse positive class names (multiple classes separated by +)
+                    class_names = class_part.split('+')
+                    for class_name in class_names:
+                        if class_name in class_map:
+                            class_idx = class_map[class_name]
+                            labels[class_idx] = 1
+        
+        file_paths.append(file_path)
+        all_labels.append(labels)
+        all_label_strengths.append(label_strength)
+    
+    # Convert to numpy arrays
+    labels_array = np.array(all_labels)
+    strengths_array = np.array(all_label_strengths)
+    
+    # Create simple metadata
+    metadata = {
+        "loading_mode": "strong_annotations_filenames",
+        "class_map": class_map
+    }
+    
+    positive_samples = np.sum(np.any(labels_array == 1, axis=1))
+    negative_samples = len(file_paths) - positive_samples
+    
+    print(f"✓ Loaded {len(file_paths)} clips from strong_annotations:")
+    print(f"  - {positive_samples} clips with positive labels")
+    print(f"  - {negative_samples} clips with only negative labels")
+    print(f"  - All labels treated as strong annotations")
+    
+    return file_paths, labels_array, strengths_array, metadata
+
 def load_training_data_with_strength(folder_path, class_map):
     """
     Load training data from exported clips with label strength information.
@@ -247,6 +402,13 @@ def load_training_data_with_strength(folder_path, class_map):
     import os
     import glob
     import json
+    
+    # Check for strong_annotations subfolder and process it if present
+    strong_annotations_path = os.path.join(folder_path, 'strong_annotations')
+    has_strong_annotations = os.path.exists(strong_annotations_path)
+    
+    if has_strong_annotations:
+        print(f"✓ Found strong_annotations subfolder, will include in processing")
     
     # Look for metadata file
     metadata_path = os.path.join(folder_path, 'export_metadata.json')
@@ -270,8 +432,8 @@ def load_training_data_with_strength(folder_path, class_map):
     else:
         print("⚠ No metadata file found, will parse from filenames only")
     
-    # Find all wav files
-    wav_files = glob.glob(os.path.join(folder_path, "*.wav"))
+    # Find all wav files recursively (including subdirectories like strong_annotations)
+    wav_files = glob.glob(os.path.join(folder_path, "**/*.wav"), recursive=True)
     
     if not wav_files:
         raise ValueError(f"No WAV files found in {folder_path}")
@@ -283,7 +445,7 @@ def load_training_data_with_strength(folder_path, class_map):
     print(f"Processing {len(wav_files)} audio files using {loading_mode} mode...")
     
     for file_path in wav_files:
-        labels, label_strength = get_label_with_strength(class_map, file_path, metadata)
+        labels, label_strength = get_label_with_strength(class_map, file_path, metadata, weak_neg_weight=0.05)
         
         # Include all files (even those with no positive labels - negative examples are important)
         file_paths.append(file_path)

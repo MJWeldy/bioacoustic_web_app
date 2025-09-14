@@ -17,11 +17,18 @@ const ModelTraining = () => {
   const [learningRate, setLearningRate] = useState(0.001);
   const [modelType, setModelType] = useState(2);
   const [verbose, setVerbose] = useState(true);
+  const [weakNegWeight, setWeakNegWeight] = useState(0.05);
   
   const [isLoading, setIsLoading] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState(null);
   const [trainingResults, setTrainingResults] = useState(null);
   const [trainingLogs, setTrainingLogs] = useState([]);
+  
+  // Data loading states
+  const [datasetLoaded, setDatasetLoaded] = useState(false);
+  const [previewData, setPreviewData] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [showTrainingData, setShowTrainingData] = useState(false);
 
   const modelTypeOptions = [
     { value: 1, label: 'Type 1 - Basic' },
@@ -82,7 +89,8 @@ const ModelTraining = () => {
           batch_size: batchSize,
           learning_rate: learningRate,
           model_type: modelType,
-          verbose: verbose
+          verbose: verbose,
+          weak_neg_weight: weakNegWeight
         }
       };
 
@@ -145,6 +153,39 @@ const ModelTraining = () => {
     }
   };
 
+  const loadTrainingDataset = async () => {
+    if (!trainingAudioFolder.trim() || !metadataPath.trim()) {
+      toast.error('Please specify both training audio folder and metadata file path');
+      return;
+    }
+
+    setPreviewLoading(true);
+    setPreviewData(null);
+    setDatasetLoaded(false);
+    
+    try {
+      const response = await axios.post('/api/model-training/preview-data', null, {
+        params: {
+          training_audio_folder: trainingAudioFolder,
+          metadata_path: metadataPath
+        }
+      });
+      
+      if (response.data.status === 'success') {
+        setPreviewData(response.data.data);
+        setDatasetLoaded(true);
+        setShowTrainingData(false); // Collapse by default
+        toast.success(`Successfully loaded ${response.data.data.total_files} training files`);
+      }
+    } catch (error) {
+      const message = error.response?.data?.detail || 'Failed to load training dataset';
+      toast.error(message);
+      setDatasetLoaded(false);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   return (
     <div>
       <div className="card">
@@ -163,7 +204,7 @@ const ModelTraining = () => {
               placeholder="/path/to/training/audio/files"
               value={trainingAudioFolder}
               onChange={(e) => setTrainingAudioFolder(e.target.value)}
-              disabled={isLoading}
+              disabled={isLoading || previewLoading}
             />
             <small style={{ color: '#666', fontSize: '0.875rem' }}>
               Folder containing labeled audio files for training
@@ -179,12 +220,240 @@ const ModelTraining = () => {
               placeholder="/path/to/dataset/metadata.json"
               value={metadataPath}
               onChange={(e) => setMetadataPath(e.target.value)}
-              disabled={isLoading}
+              disabled={isLoading || previewLoading}
             />
             <small style={{ color: '#666', fontSize: '0.875rem' }}>
               Metadata file from existing dataset for backend settings and class map
             </small>
           </div>
+        </div>
+
+        <div style={{ textAlign: 'center', marginTop: '1rem' }}>
+          <button
+            onClick={loadTrainingDataset}
+            disabled={previewLoading || !trainingAudioFolder.trim() || !metadataPath.trim()}
+            className={`btn ${datasetLoaded ? 'btn-success' : 'btn-primary'}`}
+          >
+            {previewLoading ? 'Loading Dataset...' : datasetLoaded ? '✓ Dataset Loaded' : 'Load Training Dataset'}
+          </button>
+        </div>
+      </div>
+
+      {datasetLoaded && previewData && (
+        <div className="card">
+          <div className="card-header">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3>Training Dataset</h3>
+              <button
+                onClick={() => setShowTrainingData(!showTrainingData)}
+                className="btn btn-outline"
+                style={{ fontSize: '0.875rem' }}
+              >
+                {showTrainingData ? 'Hide Details' : 'Show Details'}
+              </button>
+            </div>
+            <div style={{ marginTop: '0.5rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div className="status-indicator status-success"></div>
+                <span style={{ color: '#059669', fontWeight: '600' }}>
+                  {previewData.total_files} files loaded successfully
+                </span>
+              </div>
+            </div>
+          </div>
+          
+          {showTrainingData && (
+            <div>
+              <div style={{ marginBottom: '1.5rem' }}>
+                <div className="grid grid-2">
+                  <div>
+                    <h4>Dataset Overview</h4>
+                    <ul style={{ margin: '0', paddingLeft: '20px' }}>
+                      <li><strong>Total Files:</strong> {previewData.total_files}</li>
+                      <li><strong>Backend Model:</strong> {previewData.backend_model}</li>
+                      <li><strong>Label Strength:</strong> {previewData.use_label_strength ? 'Available' : 'Not Available (Legacy)'}</li>
+                      <li><strong>Shown:</strong> {Math.min(100, previewData.total_files)} files (limited for performance)</li>
+                    </ul>
+                  </div>
+                  <div>
+                    <h4>Classes</h4>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                      {Object.keys(previewData.class_map).map(className => (
+                        <span
+                          key={className}
+                          style={{
+                            backgroundColor: '#e3f2fd',
+                            color: '#1565c0',
+                            padding: '0.25rem 0.5rem',
+                            borderRadius: '4px',
+                            fontSize: '0.875rem',
+                            border: '1px solid #bbdefb'
+                          }}
+                        >
+                          {className}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '1rem' }}>
+                <h4>Training Files and Label Data</h4>
+                <small style={{ color: '#666' }}>
+                  Detailed view of training files with label vectors and strengths. Limited to first {Math.min(100, previewData.total_files)} files for performance.
+                </small>
+              </div>
+              
+              <div style={{ 
+                maxHeight: '600px', 
+                overflowY: 'auto',
+                overflowX: 'auto',
+                border: '1px solid #e0e0e0',
+                borderRadius: '4px'
+              }}>
+                <table style={{ 
+                  width: '100%', 
+                  borderCollapse: 'collapse',
+                  fontSize: '0.875rem'
+                }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#6e7cb9', color: 'white' }}>
+                      <th style={{ 
+                        padding: '8px', 
+                        border: '1px solid #ddd',
+                        textAlign: 'left',
+                        position: 'sticky',
+                        top: 0,
+                        backgroundColor: '#6e7cb9',
+                        minWidth: '200px',
+                        maxWidth: '300px'
+                      }}>
+                        File Name
+                      </th>
+                      <th style={{ 
+                        padding: '8px', 
+                        border: '1px solid #ddd',
+                        textAlign: 'left',
+                        position: 'sticky',
+                        top: 0,
+                        backgroundColor: '#6e7cb9',
+                        minWidth: '150px'
+                      }}>
+                        Label Vector
+                      </th>
+                      {previewData.use_label_strength && (
+                        <th style={{ 
+                          padding: '8px', 
+                          border: '1px solid #ddd',
+                          textAlign: 'left',
+                          position: 'sticky',
+                          top: 0,
+                          backgroundColor: '#6e7cb9',
+                          minWidth: '150px'
+                        }}>
+                          Strength Vector
+                        </th>
+                      )}
+                      {Object.keys(previewData.class_map).map(className => (
+                        <th key={className} style={{ 
+                          padding: '8px', 
+                          border: '1px solid #ddd',
+                          textAlign: 'center',
+                          position: 'sticky',
+                          top: 0,
+                          backgroundColor: '#6e7cb9',
+                          minWidth: '100px'
+                        }}>
+                          {className}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previewData.files.map((file, index) => (
+                      <tr key={index} style={{ 
+                        backgroundColor: index % 2 === 0 ? '#f8f9fa' : 'white'
+                      }}>
+                        <td style={{ 
+                          padding: '6px 8px', 
+                          border: '1px solid #ddd',
+                          maxWidth: '300px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          fontFamily: 'monospace',
+                          fontSize: '0.8rem'
+                        }}>
+                          {file.file_name}
+                        </td>
+                        <td style={{ 
+                          padding: '6px 8px', 
+                          border: '1px solid #ddd',
+                          fontFamily: 'monospace',
+                          fontSize: '0.75rem'
+                        }}>
+                          {file.raw_label_vector ? `[${file.raw_label_vector.join(', ')}]` : 'null'}
+                        </td>
+                        {previewData.use_label_strength && (
+                          <td style={{ 
+                            padding: '6px 8px', 
+                            border: '1px solid #ddd',
+                            fontFamily: 'monospace',
+                            fontSize: '0.75rem'
+                          }}>
+                            {file.raw_strength_vector ? `[${file.raw_strength_vector.map(v => v.toFixed(2)).join(', ')}]` : 'null'}
+                          </td>
+                        )}
+                        {Object.keys(previewData.class_map).map(className => {
+                          const label = file.class_labels[className];
+                          const strength = file.class_strengths[className];
+                          const isPresent = label === 'Present';
+                          
+                          return (
+                            <td key={className} style={{ 
+                              padding: '6px 8px', 
+                              border: '1px solid #ddd',
+                              textAlign: 'center'
+                            }}>
+                              <div style={{
+                                display: 'inline-block',
+                                backgroundColor: isPresent ? '#e8f5e8' : '#fff2f2',
+                                color: isPresent ? '#2e7d2e' : '#d32f2f',
+                                padding: '2px 6px',
+                                borderRadius: '3px',
+                                fontSize: '0.7rem',
+                                fontWeight: '600',
+                                border: `1px solid ${isPresent ? '#c8e6c9' : '#ffcdd2'}`
+                              }}>
+                                {label}
+                                {previewData.use_label_strength && strength && (
+                                  <div style={{ 
+                                    fontSize: '0.6rem', 
+                                    opacity: 0.8, 
+                                    marginTop: '1px' 
+                                  }}>
+                                    ({strength})
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="card">
+        <div className="card-header">
+          <h3>Model Training Configuration</h3>
+          <p>Configure training parameters and start model training</p>
         </div>
 
         <div className="form-group">
@@ -361,35 +630,69 @@ const ModelTraining = () => {
             </div>
           </div>
 
-          <div className="form-group">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div className="grid grid-2">
+            <div className="form-group">
+              <label htmlFor="weakNegWeight">Weak Negative Weight</label>
               <input
-                type="checkbox"
-                id="verbose"
-                checked={verbose}
-                onChange={(e) => setVerbose(e.target.checked)}
+                type="number"
+                id="weakNegWeight"
+                className="form-control"
+                min="0.01"
+                max="1.0"
+                step="0.01"
+                value={weakNegWeight}
+                onChange={(e) => setWeakNegWeight(parseFloat(e.target.value))}
                 disabled={isLoading}
-                style={{ 
-                  width: '18px', 
-                  height: '18px',
-                  accentColor: '#6e7cb9'
-                }}
               />
-              <label htmlFor="verbose" style={{ margin: 0, cursor: 'pointer' }}>
-                Verbose Output
-              </label>
+              <small style={{ color: '#666', fontSize: '0.875rem' }}>
+                Weight for weakly labeled negative samples (0.01 - 1.0)
+              </small>
             </div>
-            <small style={{ color: '#666', fontSize: '0.875rem', display: 'block', marginTop: '0.25rem' }}>
-              Show detailed training progress. If unchecked, only final loss and cMAP will be shown.
-            </small>
+
+            <div className="form-group">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '1.5rem' }}>
+                <input
+                  type="checkbox"
+                  id="verbose"
+                  checked={verbose}
+                  onChange={(e) => setVerbose(e.target.checked)}
+                  disabled={isLoading}
+                  style={{ 
+                    width: '18px', 
+                    height: '18px',
+                    accentColor: '#6e7cb9'
+                  }}
+                />
+                <label htmlFor="verbose" style={{ margin: 0, cursor: 'pointer' }}>
+                  Verbose Output
+                </label>
+              </div>
+              <small style={{ color: '#666', fontSize: '0.875rem', display: 'block', marginTop: '0.25rem' }}>
+                Show detailed training progress. If unchecked, only final loss and cMAP will be shown.
+              </small>
+            </div>
           </div>
         </div>
 
         <div style={{ textAlign: 'center', marginTop: '2rem' }}>
+          {!datasetLoaded && (
+            <div style={{ 
+              padding: '1rem', 
+              backgroundColor: '#fff3cd', 
+              border: '1px solid #ffeaa7', 
+              borderRadius: '4px',
+              marginBottom: '1rem'
+            }}>
+              <p style={{ margin: '0', color: '#856404' }}>
+                ⚠️ Please load your training dataset first before configuring training parameters.
+              </p>
+            </div>
+          )}
+          
           {trainingStatus !== 'training' ? (
             <button
               onClick={startTraining}
-              disabled={isLoading}
+              disabled={isLoading || !datasetLoaded}
               className="btn btn-primary btn-lg"
             >
               {isLoading ? 'Starting Training...' : 'Start Training'}
@@ -477,19 +780,21 @@ const ModelTraining = () => {
         </div>
       )}
 
+
       <div className="card">
         <div className="card-header">
           <h3>Instructions</h3>
         </div>
         <div style={{ lineHeight: '1.6' }}>
           <ol>
-            <li><strong>Training Audio Folder:</strong> Select folder containing labeled audio files</li>
-            <li><strong>Metadata File:</strong> Load metadata.json from existing dataset for backend settings</li>
-            <li><strong>Configure Parameters:</strong> Set test split, model architecture, and training parameters</li>
-            <li><strong>Start Training:</strong> Begin training process with fit_w_tape function</li>
+            <li><strong>Specify Paths:</strong> Enter paths to your training audio folder and dataset metadata file</li>
+            <li><strong>Load Dataset:</strong> Click "Load Training Dataset" to validate and preview your training data</li>
+            <li><strong>Review Data:</strong> Inspect the collapsible "Training Dataset" section to verify files, labels, and label strengths</li>
+            <li><strong>Configure Training:</strong> Set test split method, model architecture, and training parameters</li>
+            <li><strong>Start Training:</strong> Begin training process with the fit_w_tape function</li>
             <li><strong>Monitor Progress:</strong> Watch training logs and metrics in real-time</li>
           </ol>
-          <p><strong>Note:</strong> Training may take several minutes to hours depending on dataset size and parameters. The trained model will be saved to the specified path.</p>
+          <p><strong>Note:</strong> You must load your dataset before training can begin. Training may take several minutes to hours depending on dataset size and parameters. The trained model will be saved to the specified path.</p>
         </div>
       </div>
     </div>

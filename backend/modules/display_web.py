@@ -49,8 +49,13 @@ class WebAnnotationInterface:
         # Top-down mode specific variables
         self.top_down_position = -1
         
+        # Top 10+score quantiles mode specific variables
+        self.quantile_round_clips = []
+        self.quantile_position = -1
+        self.quantile_round_complete = False
+        
         # Validate review mode
-        if self.review_mode not in ["random", "top_down"]:
+        if self.review_mode not in ["random", "top_down", "top_10+score_quantiles"]:
             print(f"Invalid review mode: {self.review_mode}. Using 'random' instead.")
             self.review_mode = "random"
 
@@ -148,9 +153,10 @@ class WebAnnotationInterface:
         Returns:
             Filtered polars DataFrame
         """
+        # Use the backwards compatible df property that has score and annotation columns
         df = self.audio_db.df
         
-        # Apply score filter
+        # Apply score filter based on confidence predictions
         filtered_df = df.filter(
             (pl.col("score") >= score_min) & 
             (pl.col("score") <= score_max)
@@ -167,8 +173,79 @@ class WebAnnotationInterface:
         if self.review_mode == "top_down":
             filtered_df = filtered_df.sort("score", descending=True)
         
+        # Reset quantile mode state when filters change
+        if self.review_mode == "top_10+score_quantiles":
+            self.quantile_round_clips = []
+            self.quantile_position = -1
+            self.quantile_round_complete = False
+        
         self.filtered_df = filtered_df
         return filtered_df
+
+    def _generate_quantile_round_clips(self) -> List[int]:
+        """
+        Generate indices for the top 10+score quantiles review mode.
+        Returns up to 50 clips: top 10 highest scoring + 10 clips from each of 4 score quantiles.
+        
+        Returns:
+            List of clip indices for the round
+        """
+        if self.filtered_df is None or len(self.filtered_df) == 0:
+            return []
+        
+        # Get scores and sort indices by score (descending)
+        scores_with_indices = []
+        for i in range(len(self.filtered_df)):
+            # Get confidence prediction scores - assuming they exist in the dataframe
+            row = self.filtered_df.row(i)
+            clip_dict = dict(zip(self.filtered_df.columns, row))
+            
+            # Extract max score across all classes for ranking
+            confidence_predictions = clip_dict.get('confidence_predictions', [])
+            if confidence_predictions:
+                max_score = max(confidence_predictions) if isinstance(confidence_predictions, list) else confidence_predictions
+            else:
+                max_score = 0.0
+            
+            scores_with_indices.append((i, max_score))
+        
+        # Sort by score descending
+        scores_with_indices.sort(key=lambda x: x[1], reverse=True)
+        
+        round_indices = []
+        
+        # 1. Top 10 highest scoring clips
+        top_10_indices = [idx for idx, score in scores_with_indices[:10]]
+        round_indices.extend(top_10_indices)
+        print(f"DEBUG Quantiles: Added top 10 clips with scores: {[score for _, score in scores_with_indices[:10]]}")
+        
+        # 2. Score quantile ranges: 0-0.5, 0.5-0.75, 0.75-0.875, 0.875-1.0
+        score_ranges = [
+            (0.0, 0.5),
+            (0.5, 0.75), 
+            (0.75, 0.875),
+            (0.875, 1.0)
+        ]
+        
+        for min_score, max_score in score_ranges:
+            # Find clips in this score range (excluding top 10 already selected)
+            range_indices = []
+            for idx, score in scores_with_indices:
+                if idx not in top_10_indices and min_score <= score <= max_score:
+                    range_indices.append(idx)
+            
+            # Randomly select up to 10 clips from this range
+            if range_indices:
+                selected_count = min(10, len(range_indices))
+                selected_indices = random.sample(range_indices, selected_count)
+                round_indices.extend(selected_indices)
+                scores_for_range = [scores_with_indices[i][1] for i in range(len(scores_with_indices)) if scores_with_indices[i][0] in selected_indices]
+                print(f"DEBUG Quantiles: Added {selected_count} clips from range {min_score}-{max_score} with scores: {scores_for_range}")
+            else:
+                print(f"DEBUG Quantiles: No clips found in range {min_score}-{max_score}")
+        
+        print(f"DEBUG Quantiles: Generated round with {len(round_indices)} total clips")
+        return round_indices
 
     def get_next_clip(self) -> Optional[Dict]:
         """
@@ -191,26 +268,60 @@ class WebAnnotationInterface:
                 self.current_index = self.top_down_position
             else:
                 return None
+        elif self.review_mode == "top_10+score_quantiles":
+            # Check if we need to generate a new round
+            if not self.quantile_round_clips or self.quantile_position >= len(self.quantile_round_clips) - 1:
+                # Generate new round of clips
+                self.quantile_round_clips = self._generate_quantile_round_clips()
+                self.quantile_position = -1
+                self.quantile_round_complete = False
+                print(f"DEBUG Quantiles: Generated new round with {len(self.quantile_round_clips)} clips")
+                
+                if not self.quantile_round_clips:
+                    return None
+            
+            # Get next clip from current round
+            if self.quantile_position < len(self.quantile_round_clips) - 1:
+                self.quantile_position += 1
+                clip_index = self.quantile_round_clips[self.quantile_position]
+                clip_row = self.filtered_df.row(clip_index)
+                self.current_index = clip_index
+                
+                # Mark round as complete when we reach the last clip
+                if self.quantile_position == len(self.quantile_round_clips) - 1:
+                    self.quantile_round_complete = True
+                    print(f"DEBUG Quantiles: Completed round ({self.quantile_position + 1}/{len(self.quantile_round_clips)} clips)")
+            else:
+                return None
         
-        return self._clip_row_to_dict(clip_row)
+        # Convert row to dict using proper column names
+        clip_dict = dict(zip(self.filtered_df.columns, clip_row))
+        return self._convert_clip_dict(clip_dict)
 
-    def _clip_row_to_dict(self, clip_row: tuple) -> Dict:
-        """Convert clip row tuple to dictionary"""
-        return {
-            "file_name": clip_row[0],
-            "file_path": clip_row[1],
-            "duration_sec": clip_row[2],
-            "clip_start": clip_row[3],
-            "clip_end": clip_row[4],
-            "sampling_rate": clip_row[5],
-            "score": clip_row[6],
-            "annotation": clip_row[7],
-            "predictions": clip_row[8],
-            "annotation_status": clip_row[9],
-            "label_strength": clip_row[10],
-            "created_at": clip_row[11],
-            "clip_id": f"{clip_row[1]}|{clip_row[3]}|{clip_row[4]}"
-        }
+
+    def _convert_clip_dict(self, clip_dict: Dict) -> Dict:
+        """Convert clip dictionary with proper type conversion"""
+        def convert_value(value):
+            """Convert numpy/polars types to native Python types"""
+            if value is None:
+                return None
+            elif hasattr(value, 'item'):  # numpy scalar
+                return float(value.item()) if hasattr(value.item(), '__float__') else value.item()
+            elif isinstance(value, list) and len(value) > 0 and hasattr(value[0], 'item'):  # numpy array elements
+                return [v.item() if hasattr(v, 'item') else v for v in value]
+            elif hasattr(value, '__float__'):  # Try to convert to float if possible
+                return float(value)
+            else:
+                return value
+        
+        # Convert all values and use the proper clip_id
+        result = {}
+        for key, value in clip_dict.items():
+            result[key] = convert_value(value)
+        
+        print(f"DEBUG: Final clip dict clip_id: {result.get('clip_id')}")
+        print(f"DEBUG: Final clip dict clip_end: {result.get('clip_end')}, type: {type(result.get('clip_end'))}")
+        return result
 
 
 

@@ -26,7 +26,7 @@ The Active Learning tab should include the following functions
 The Model Training tab should include the following functions
 - Select a folder of wav files that will be used for model training
 - Load and embed the clips 
-- Read the clip labels from the file names
+- Read the clip labels from the file names (supports new `Site_001_Rep_C_165.0-YRWA_song_1+BRMA_call_1.wav` format)
 - Create train and test partitions of the data allowing me to select a random state and test data size 
 - Train a new classifier using the tc.fit_w_tape function, allow me to control access to the function arguments 
 
@@ -81,7 +81,7 @@ A web-based application for building datasets and performing active learning in 
   - Intuitive navigation controls (Previous/Next/Jump to clip)
 - **Flexible Annotations**: Support for Present (1), Not Present (0), and Uncertain (3) labels
 - **Enhanced Export System**: Export annotated clips with complete label strength preservation
-  - **Smart Filenames**: `filename_clipstart-annotation_slug-strong.wav` format
+  - **Smart Filenames**: `filename_clipstart-classname1+classname2.wav` format
   - **Metadata Export**: Complete binary label vectors and strength information in JSON
   - **Multiclass Support**: Full annotation state preservation for all classes
 - **Data Management**: Save annotations to database and export with complete metadata
@@ -89,9 +89,9 @@ A web-based application for building datasets and performing active learning in 
 
 ### 🤖 **Model Training Tab**
 - **Enhanced Data Loading**: Intelligent loading system with priority-based label extraction
-  - **Priority 1**: Metadata binary vectors (multiclass-compatible)
-  - **Priority 2**: Enhanced filename parsing (strong labels only)
-  - **Priority 3**: Legacy filename parsing (backward compatibility)
+  - **Priority 1**: Metadata binary vectors (multiclass-compatible with complete annotation state)
+  - **Priority 2**: Modern filename parsing (`originalname_clipstart-class1+class2.wav` format)
+  - **Priority 3**: Legacy filename parsing (underscore separators and class-in-filename patterns)
 - **Automatic Embedding**: Load and embed audio clips using selected backend models
 - **Label Strength Integration**: Automatic detection and use of weak/strong label information
 - **Data Partitioning**: Create train/test splits preserving label strength information
@@ -281,13 +281,13 @@ cd frontend && npm start
 7. **Export Results**: Export annotated clips as WAV files
 
 ### Model Training
-1. **Select Training Data**: Choose folder containing annotated WAV files
-2. **Configure Embedding**: Select backend model for feature extraction
-3. **Set Parameters**: Configure random state, test size, and training parameters
-4. **Create Data Splits**: Generate train/test partitions
-5. **Start Training**: Begin model training with progress monitoring
-6. **Monitor Progress**: View real-time training metrics and loss curves
-7. **Save Model**: Export trained classifier for use in other tabs
+1. **Select Training Data**: Choose folder containing annotated WAV files (supports new `+` separator format)
+2. **Load Dataset Metadata**: Specify metadata file path for enhanced label extraction
+3. **Preview Training Data**: Review loaded files, labels, and label strengths before training
+4. **Configure Training**: Set test split method, model architecture, and training parameters  
+5. **Start Training**: Begin model training with progress monitoring and real-time logs
+6. **Monitor Progress**: View training metrics, loss curves, and macro cMAP scores
+7. **Save Model**: Export trained classifier (.keras format) for use in other tabs
 
 ### Evaluation
 1. **Load Test Dataset**: Select folder with annotated audio clips for evaluation
@@ -322,12 +322,10 @@ cd frontend && npm start
 - `GET /api/audio/{file_path}`: Stream audio clips
 
 ### Model Training
-- `POST /api/training/load-data`: Load annotated audio files for training
-- `POST /api/training/create-partitions`: Create train/test data splits
-- `POST /api/training/start`: Start model training with specified parameters
-- `GET /api/training/status`: Get current training progress and metrics
-- `POST /api/training/stop`: Stop current training process
-- `GET /api/training/history`: Get training history and loss curves
+- `POST /api/model-training/preview-data`: Preview training data files, labels, and label strengths
+- `POST /api/model-training/start`: Start model training with enhanced configuration and progress tracking
+- `GET /api/model-training/status`: Get current training progress, logs, and metrics
+- `POST /api/model-training/stop`: Stop current training process
 
 ### Evaluation
 - `POST /api/evaluation/load-dataset`: Load evaluation dataset
@@ -435,10 +433,12 @@ This application implements a complete active learning pipeline with advanced la
 
 **Smart Filename Convention:**
 ```
-filename_clipstart-annotation_slug-strong.wav
+Site_001_Rep_C_165.0-YRWA_song_1+BRMA_call_1.wav
 ```
-- **Simple & Unambiguous**: Only strong labels in filenames to avoid multiclass conflicts
-- **Backward Compatible**: Works with legacy filename parsing systems
+- **Multiclass Support**: Multiple classes separated by `+` (plus sign) after the hyphen
+- **Negative Examples**: Files with no positive classes use `filename-empty.wav` format  
+- **Clear Structure**: `originalname_clipstart-classname1+classname2+classname3.wav`
+- **Backward Compatible**: Legacy parsing still supported for existing datasets
 
 **Enhanced Metadata Export:**
 ```json
@@ -453,11 +453,15 @@ filename_clipstart-annotation_slug-strong.wav
   "class_map": {"NOWA_song": 0, "CEWA": 1, "WIWA": 2},
   "clips": [
     {
-      "filename": "audio_10.0-NOWA_song-strong.wav",
-      "annotation_slug": "NOWA_song",
-      "labels": [1, 0, 0],              // Binary vector for all classes
+      "filename": "Site_001_Rep_C_165.0-YRWA_song_1+BRMA_call_1.wav",
+      "labels": [1, 1, 0],              // Binary vector for all classes
       "label_strengths": [1, 1, 0],     // Strength vector: 1=strong, 0=weak
-      "scores": [0.85, 0.12, 0.03]      // Prediction scores for all classes
+      "scores": [0.85, 0.78, 0.03],     // Prediction scores for all classes
+      "annotations": {                  // Human annotations by class
+        "YRWA_song_1": "present",
+        "BRMA_call_1": "present", 
+        "WIWA": "not_present"
+      }
     }
   ]
 }
@@ -466,9 +470,9 @@ filename_clipstart-annotation_slug-strong.wav
 ### **Intelligent Import System (Model Training)**
 
 **Priority-Based Loading:**
-1. **🥇 Metadata Binary Vectors**: Most accurate, full multiclass support
-2. **🥈 Enhanced Filenames**: Strong labels only, single-class compatible  
-3. **🥉 Legacy Filenames**: Backward compatibility with existing datasets
+1. **🥇 Metadata Binary Vectors**: Most accurate, full multiclass support with complete annotation state
+2. **🥈 Modern Filename Format**: `originalname_clipstart-class1+class2.wav` - multiclass support with `+` separator  
+3. **🥉 Legacy Filename Formats**: Backward compatibility with underscore separators and class-in-filename patterns
 
 **Label Strength Integration:**
 - **Strong Labels** (confident annotations): Full weight (1.0) in loss function

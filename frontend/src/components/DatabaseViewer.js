@@ -16,6 +16,10 @@ const DatabaseViewer = () => {
   const [filterValue, setFilterValue] = useState('');
   const [columnStats, setColumnStats] = useState(null);
   const [selectedStatsColumn, setSelectedStatsColumn] = useState('');
+  const [annotationSummary, setAnnotationSummary] = useState(null);
+  const [reviewClips, setReviewClips] = useState([]);
+  const [files, setFiles] = useState([]);
+  const [selectedTable, setSelectedTable] = useState('clips');
 
   const pageSizeOptions = [
     { value: 25, label: '25 rows' },
@@ -24,21 +28,22 @@ const DatabaseViewer = () => {
     { value: 200, label: '200 rows' }
   ];
 
+  const tableOptions = [
+    { value: 'files', label: 'Files Table' },
+    { value: 'clips', label: 'Clips Table' }, 
+    { value: 'annotations', label: 'Annotations Table' },
+    { value: 'clips_with_files', label: 'Clips with File Info (Joined)' }
+  ];
+
   const loadDatabaseInfo = async () => {
     try {
+      // Load overall database info first
       const response = await axios.get('/api/database/info');
       if (response.data.status === 'success') {
-        const info = response.data.info;
-        setDatabaseInfo(info);
+        setDatabaseInfo(response.data.info);
         
-        // Set up column options
-        const columns = info.columns.map(col => ({
-          value: col,
-          label: `${col} (${info.schema[col]})`
-        }));
-        setAvailableColumns(columns);
-        
-        // Load initial data
+        // Load initial table info and data
+        await loadTableInfo();
         await loadData();
       }
     } catch (error) {
@@ -54,6 +59,26 @@ const DatabaseViewer = () => {
     }
   };
 
+  const loadTableInfo = async () => {
+    try {
+      const response = await axios.get('/api/database/table-info', {
+        params: { table: selectedTable }
+      });
+      
+      if (response.data.status === 'success') {
+        const info = response.data.info;
+        // Set up column options for the selected table
+        const columns = info.columns.map(col => ({
+          value: col,
+          label: `${col} (${info.schema[col]})`
+        }));
+        setAvailableColumns(columns);
+      }
+    } catch (error) {
+      console.error('Failed to load table info:', error);
+    }
+  };
+
   const loadData = async (page = 0) => {
     if (!databaseInfo) return;
     
@@ -65,6 +90,7 @@ const DatabaseViewer = () => {
         : null;
       
       const params = {
+        table: selectedTable,
         limit: pageSize,
         offset: offset,
         ...(columnsParam && { columns: columnsParam }),
@@ -74,7 +100,7 @@ const DatabaseViewer = () => {
         })
       };
       
-      const response = await axios.get('/api/database/data', { params });
+      const response = await axios.get('/api/database/table-data', { params });
       
       if (response.data.status === 'success') {
         setData(response.data.data);
@@ -101,6 +127,39 @@ const DatabaseViewer = () => {
       }
     } catch (error) {
       toast.error('Failed to load column statistics');
+    }
+  };
+
+  const loadAnnotationSummary = async () => {
+    try {
+      const response = await axios.get('/api/database/annotation-summary');
+      if (response.data.status === 'success') {
+        setAnnotationSummary(response.data.summary);
+      }
+    } catch (error) {
+      console.error('Failed to load annotation summary:', error);
+    }
+  };
+
+  const loadReviewClips = async () => {
+    try {
+      const response = await axios.get('/api/database/review-clips');
+      if (response.data.status === 'success') {
+        setReviewClips(response.data.clips.slice(0, 10)); // Show first 10 for demo
+      }
+    } catch (error) {
+      console.error('Failed to load review clips:', error);
+    }
+  };
+
+  const loadFiles = async () => {
+    try {
+      const response = await axios.get('/api/database/files');
+      if (response.data.status === 'success') {
+        setFiles(response.data.files);
+      }
+    } catch (error) {
+      console.error('Failed to load files:', error);
     }
   };
 
@@ -133,10 +192,27 @@ const DatabaseViewer = () => {
   }, []);
 
   useEffect(() => {
+    if (databaseInfo?.new_structure) {
+      loadAnnotationSummary();
+      loadReviewClips();
+      loadFiles();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [databaseInfo]);
+
+  useEffect(() => {
     if (selectedStatsColumn) {
       loadColumnStats(selectedStatsColumn);
     }
   }, [selectedStatsColumn]);
+
+  useEffect(() => {
+    if (databaseInfo) {
+      loadTableInfo();
+      loadData(0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTable]);
 
   if (!databaseInfo) {
     return (
@@ -197,11 +273,49 @@ const DatabaseViewer = () => {
                 </ul>
               </div>
             )}
+            {databaseInfo.new_structure && (
+              <div>
+                <strong>New Structure:</strong>
+                <ul style={{ margin: '0.25rem 0', paddingLeft: '20px' }}>
+                  <li>Files: {databaseInfo.new_structure.files_count}</li>
+                  <li>Clips: {databaseInfo.new_structure.clips_count}</li>
+                  <li>Annotations: {databaseInfo.new_structure.annotations_count}</li>
+                </ul>
+              </div>
+            )}
           </div>
         </div>
 
         {/* Controls */}
-        <div className="grid grid-2" style={{ marginBottom: '1.5rem' }}>
+        <div className="grid grid-3" style={{ marginBottom: '1.5rem' }}>
+          <div className="form-group">
+            <label htmlFor="tableSelect">Table to View</label>
+            <Select
+              id="tableSelect"
+              options={tableOptions}
+              value={tableOptions.find(opt => opt.value === selectedTable)}
+              onChange={(selected) => {
+                setSelectedTable(selected.value);
+                // Reset column selection and filters when table changes
+                setSelectedColumns([]);
+                setFilterColumn('');
+                setFilterValue('');
+              }}
+              isSearchable={false}
+              styles={{
+                control: (base) => ({
+                  ...base,
+                  border: '2px solid #6e7cb9',
+                  '&:hover': { border: '2px solid #6e7cb9' },
+                  '&:focus-within': { 
+                    border: '2px solid #6e7cb9',
+                    boxShadow: '0 0 0 3px rgba(110, 124, 185, 0.1)'
+                  }
+                })
+              }}
+            />
+          </div>
+
           <div className="form-group">
             <label htmlFor="columnSelect">Select Columns (leave empty for all)</label>
             <Select
@@ -263,8 +377,8 @@ const DatabaseViewer = () => {
                 onChange={(e) => setFilterColumn(e.target.value)}
               >
                 <option value="">Select column...</option>
-                {databaseInfo.columns.map(col => (
-                  <option key={col} value={col}>{col}</option>
+                {availableColumns.map(col => (
+                  <option key={col.value} value={col.value}>{col.value}</option>
                 ))}
               </select>
             </div>
@@ -386,6 +500,151 @@ const DatabaseViewer = () => {
           </div>
         )}
 
+        {/* New Three-Table Structure Queries */}
+        {databaseInfo?.new_structure && annotationSummary && (
+          <div className="card" style={{ marginTop: '2rem' }}>
+            <div className="card-header">
+              <h4>Three-Table Structure Query Examples</h4>
+              <p>Demonstration of enhanced querying capabilities with the new Files → Clips → Annotations structure</p>
+            </div>
+            
+            {/* Annotation Summary */}
+            <div style={{ marginBottom: '1.5rem' }}>
+              <h5 style={{ color: '#6e7cb9', marginBottom: '0.5rem' }}>Annotation Summary</h5>
+              <div style={{ 
+                padding: '1rem', 
+                backgroundColor: '#f8f9fa', 
+                borderRadius: '4px',
+                border: '1px solid #e89c81'
+              }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1rem' }}>
+                  <div>
+                    <strong>Database Structure:</strong>
+                    <ul style={{ margin: '0.25rem 0', paddingLeft: '20px' }}>
+                      <li>Total Files: {annotationSummary.database_structure.total_files}</li>
+                      <li>Total Clips: {annotationSummary.database_structure.total_clips}</li>
+                      <li>Annotated Clips: {annotationSummary.database_structure.annotated_clips}</li>
+                      <li>Unannotated Clips: {annotationSummary.database_structure.unannotated_clips}</li>
+                    </ul>
+                  </div>
+                  {Object.keys(annotationSummary.annotations_by_class).length > 0 && (
+                    <div>
+                      <strong>Annotations by Class:</strong>
+                      {Object.entries(annotationSummary.annotations_by_class).map(([className, stats]) => (
+                        <div key={className} style={{ marginLeft: '10px', marginTop: '0.5rem' }}>
+                          <strong>{className}:</strong>
+                          <ul style={{ margin: '0.25rem 0', paddingLeft: '20px', fontSize: '0.875rem' }}>
+                            <li>Present: {stats.present}</li>
+                            <li>Not Present: {stats.not_present}</li>
+                            <li>Uncertain: {stats.uncertain}</li>
+                            <li>Total: {stats.total}</li>
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Files List Sample */}
+            {files.length > 0 && (
+              <div style={{ marginBottom: '1.5rem' }}>
+                <h5 style={{ color: '#6e7cb9', marginBottom: '0.5rem' }}>Files Table Sample (Query: /api/database/files)</h5>
+                <div style={{ 
+                  padding: '1rem', 
+                  backgroundColor: '#f8f9fa', 
+                  borderRadius: '4px',
+                  border: '1px solid #7bbcd5'
+                }}>
+                  <p style={{ fontSize: '0.875rem', color: '#666', marginBottom: '0.5rem' }}>
+                    Shows {Math.min(5, files.length)} of {files.length} files in the database:
+                  </p>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', fontSize: '0.8rem', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr style={{ backgroundColor: '#7bbcd5', color: 'white' }}>
+                          <th style={{ padding: '4px 8px', border: '1px solid #ddd' }}>File Name</th>
+                          <th style={{ padding: '4px 8px', border: '1px solid #ddd' }}>Duration (s)</th>
+                          <th style={{ padding: '4px 8px', border: '1px solid #ddd' }}>Sample Rate</th>
+                          <th style={{ padding: '4px 8px', border: '1px solid #ddd' }}>Path</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {files.slice(0, 5).map((file, index) => (
+                          <tr key={file.file_id} style={{ backgroundColor: index % 2 === 0 ? 'white' : '#f8f9fa' }}>
+                            <td style={{ padding: '4px 8px', border: '1px solid #ddd' }}>{file.file_name}</td>
+                            <td style={{ padding: '4px 8px', border: '1px solid #ddd' }}>{file.duration_sec?.toFixed(1)}</td>
+                            <td style={{ padding: '4px 8px', border: '1px solid #ddd' }}>{file.sampling_rate}</td>
+                            <td style={{ 
+                              padding: '4px 8px', 
+                              border: '1px solid #ddd',
+                              maxWidth: '200px',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap'
+                            }}>
+                              {file.file_path}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Review Clips Sample */}
+            {reviewClips.length > 0 && (
+              <div style={{ marginBottom: '1.5rem' }}>
+                <h5 style={{ color: '#6e7cb9', marginBottom: '0.5rem' }}>Clips with Annotations Sample (Query: /api/database/review-clips)</h5>
+                <div style={{ 
+                  padding: '1rem', 
+                  backgroundColor: '#f8f9fa', 
+                  borderRadius: '4px',
+                  border: '1px solid #d0eaf1'
+                }}>
+                  <p style={{ fontSize: '0.875rem', color: '#666', marginBottom: '0.5rem' }}>
+                    Shows first {reviewClips.length} clips that contain at least one annotation:
+                  </p>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', fontSize: '0.8rem', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr style={{ backgroundColor: '#6e7cb9', color: 'white' }}>
+                          <th style={{ padding: '4px 8px', border: '1px solid #ddd' }}>File</th>
+                          <th style={{ padding: '4px 8px', border: '1px solid #ddd' }}>Clip Time</th>
+                          <th style={{ padding: '4px 8px', border: '1px solid #ddd' }}>Duration</th>
+                          <th style={{ padding: '4px 8px', border: '1px solid #ddd' }}>Confidence</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reviewClips.map((clip, index) => (
+                          <tr key={clip.clip_id} style={{ backgroundColor: index % 2 === 0 ? 'white' : '#f8f9fa' }}>
+                            <td style={{ padding: '4px 8px', border: '1px solid #ddd' }}>{clip.file_name}</td>
+                            <td style={{ padding: '4px 8px', border: '1px solid #ddd' }}>
+                              {clip.clip_start?.toFixed(1)}s - {clip.clip_end?.toFixed(1)}s
+                            </td>
+                            <td style={{ padding: '4px 8px', border: '1px solid #ddd' }}>
+                              {((clip.clip_end || 0) - (clip.clip_start || 0)).toFixed(1)}s
+                            </td>
+                            <td style={{ padding: '4px 8px', border: '1px solid #ddd' }}>
+                              {clip.confidence_predictions ? 
+                                clip.confidence_predictions[0]?.toFixed(3) || 'N/A' : 
+                                'N/A'
+                              }
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Column Statistics */}
         <div className="card" style={{ marginTop: '2rem' }}>
           <div className="card-header">
@@ -400,8 +659,8 @@ const DatabaseViewer = () => {
               onChange={(e) => setSelectedStatsColumn(e.target.value)}
             >
               <option value="">Select column...</option>
-              {databaseInfo.columns.map(col => (
-                <option key={col} value={col}>{col}</option>
+              {availableColumns.map(col => (
+                <option key={col.value} value={col.value}>{col.value}</option>
               ))}
             </select>
           </div>
@@ -477,13 +736,21 @@ const DatabaseViewer = () => {
         </div>
         <div style={{ lineHeight: '1.6' }}>
           <ol>
-            <li><strong>Database Info:</strong> View basic information about the loaded database</li>
-            <li><strong>Column Selection:</strong> Choose specific columns to display or leave empty for all</li>
+            <li><strong>Table Selection:</strong> Choose which table to view from the dropdown (Files, Clips, Annotations, or joined view)</li>
+            <li><strong>Database Info:</strong> View basic information about the loaded database, including the three-table structure counts</li>
+            <li><strong>Three-Table Queries:</strong> See demonstration queries showing Files → Clips → Annotations relationships</li>
+            <li><strong>Column Selection:</strong> Choose specific columns to display or leave empty for all (updates based on selected table)</li>
             <li><strong>Filtering:</strong> Filter rows by column values (supports text search and exact matches)</li>
             <li><strong>Pagination:</strong> Navigate through large datasets with customizable page sizes</li>
-            <li><strong>Column Statistics:</strong> Get detailed statistics for any column</li>
+            <li><strong>Column Statistics:</strong> Get detailed statistics for any column in the selected table</li>
           </ol>
-          <p><strong>Note:</strong> This viewer shows the current state of the database including all annotations and multiclass data. List columns (predictions, annotation_status, label_strength) are displayed as string representations.</p>
+          <p><strong>Three-Table Structure:</strong> The database uses a normalized structure where:</p>
+          <ul>
+            <li><strong>Files Table:</strong> Stores audio file metadata (filepath, duration, sample rate)</li>
+            <li><strong>Clips Table:</strong> Stores clip segments with annotation status and confidence predictions</li>
+            <li><strong>Annotations Table:</strong> Stores human labels (present/not_present/uncertain)</li>
+            <li><strong>Clips with File Info:</strong> Joined view combining clips and file information</li>
+          </ul>
         </div>
       </div>
     </div>

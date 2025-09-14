@@ -661,9 +661,63 @@ run_test() {
 
 ---
 
-**Initial Development**: June 4, 2025 (4 hours)  
-**Enhanced Workflow Implementation**: December 10, 2025 (2 hours)  
-**Production Stability and Robustness**: December 30, 2025 (3 hours)  
-**Total development time**: ~9 hours  
-**Final status**: ✅ Production-ready advanced active learning platform with comprehensive diagnostics  
-**Project quality**: Research-grade with enterprise-level reliability and documentation
+### Phase 11: Enhanced Multi-Class Annotation System (January 14, 2025)
+
+#### Issue Addressed
+User reported inability to see the text box for entering additional positive classes on the Active Learning tab. Investigation revealed the user needed a way to annotate multiple existing classes as positive for the same clip, rather than adding new classes to the class_map.
+
+#### Solution Implemented
+
+**Backend Enhancements** (`backend/main.py`):
+- **New API Endpoint**: `/api/active-learning/annotate-class` for annotating specific classes
+- **New Data Model**: `MultiClassAnnotationRequest` with `class_index` parameter
+- **Flexible Annotation**: Can annotate any specific class without changing the current target
+
+**Frontend Enhancements** (`frontend/src/components/ActiveLearning.js`):
+- **Multi-Select Interface**: Dropdown showing all existing classes except the currently selected target class
+- **Dynamic Button**: Shows "Mark X Class(es) as Present" with count of selected classes
+- **Visual Design**: Themed styling with colored tags for selected classes
+- **Smart Filtering**: Automatically excludes current target class from selection options
+
+#### Key Features Added
+
+**Enhanced Workflow**:
+1. **Select Target Class**: Choose primary annotation focus using existing dropdown
+2. **Mark Additional Classes**: Use new multi-select field to choose other existing classes also present in the clip
+3. **Annotate Multiple Classes**: Click "Mark X Classes as Present" to annotate all selected additional classes as positive
+4. **Real-time Updates**: Clip labels and statistics update immediately to show all positive annotations
+
+**Technical Implementation**:
+- **Backend Route**: `POST /api/active-learning/annotate-class` accepts `clip_id`, `annotation`, and `class_index`
+- **Frontend Component**: React-Select multi-select component with custom styling
+- **State Management**: `additionalPositiveClasses` state for tracking multi-selections
+- **API Integration**: Seamless calls to new endpoint for each selected class
+
+#### User Experience Improvements
+- **Intuitive Interface**: Clear labeling and helpful tooltips explain functionality
+- **Efficient Workflow**: Can annotate multiple classes for a single clip in one operation
+- **Visual Feedback**: Selected classes display as colored tags before annotation
+- **Error Handling**: Proper validation and user feedback for failed operations
+
+#### Technical Architecture
+The implementation maintains the existing single-class annotation workflow while adding parallel support for multi-class annotation:
+
+```javascript
+// Target class annotation (existing)
+POST /api/active-learning/annotate
+
+// Additional class annotation (new)
+POST /api/active-learning/annotate-class
+```
+
+This preserves backward compatibility while providing enhanced multi-class capabilities for complex bioacoustic annotation scenarios.
+
+---
+
+**Initial Development**: June 4, 2025 (4 hours)
+**Enhanced Workflow Implementation**: December 10, 2025 (2 hours)
+**Production Stability and Robustness**: December 30, 2025 (3 hours)
+**Multi-Class Annotation Enhancement**: January 14, 2025 (1 hour)
+**Total development time**: ~10 hours
+**Final status**: ✅ Production-ready advanced active learning platform with enhanced multi-class annotation
+**Project quality**: Research-grade with enterprise-level reliability and comprehensive multi-class annotation support

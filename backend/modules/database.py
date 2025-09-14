@@ -12,7 +12,10 @@ from modules import config as cfg
 class Audio_DB:
   def __init__(self, embedding_dim: int = 1280, num_classes: int = 1):
       """
-      Initialize the audio prediction and embedding database with polars.
+      Initialize the audio prediction and embedding database with three-table structure:
+      - files: File metadata (filepath, duration, sample_rate, etc.)
+      - clips: Clip segments (file_id FK, start_time, end_time, annotation_status, confidence)
+      - annotations: Human annotations (clip_id FK, class_name, label)
       
       Args:
           embedding_dim: Dimension size of the embeddings
@@ -22,168 +25,206 @@ class Audio_DB:
       self.score_max = 1.0
       self.embedding_dim = embedding_dim
       self.num_classes = num_classes
-      self.df = pl.DataFrame(
+      
+      # Files table - stores file metadata
+      self.files_df = pl.DataFrame(
         schema={
-          'file_name': pl.Utf8,
-          'file_path': pl.Utf8,
-          'duration_sec': pl.Float32,
-          'clip_start': pl.Float32,
-          'clip_end': pl.Float32,
-          'sampling_rate': pl.Int32,
-          'score': pl.Float32,
-          'annotation': pl.Int32,
-          'predictions': pl.List(pl.Float32),  # Vector of predictions for all classes
-          'annotation_status': pl.List(pl.Int32),  # Vector of annotation status for all classes
-          'label_strength': pl.List(pl.Int32),  # Vector indicating strong (1) vs weak (0) labels
-          'embedding_index': pl.Int64,  # Index into embeddings array
-          'created_at': pl.Datetime
+          'file_id': pl.Utf8,  # Primary key: unique identifier for each file
+          'file_name': pl.Utf8,  # Name of the audio file (without path)
+          'file_path': pl.Utf8,  # Full path to the audio file
+          'duration_sec': pl.Float32,  # Total duration of the audio file
+          'sampling_rate': pl.Int32,  # Audio sampling rate
+          'created_at': pl.Datetime  # When file was added to database
         }
       )
-      #'embedding': pl.List(pl.Float32),
-      #'metadata': pl.Struct,  # For storing additional information
-  def add_clip_row(self, 
-                   file_name: str, 
-                   file_path: str, 
-                   duration_sec: float, 
-                   clip_start: float,
-                   clip_end: float,
-                   sampling_rate: int,
-                   embedding_index: int = None) -> None:
-                    #embedding: List[float],
-                    #metadata: Dict[str, Any] = None) -> None:
+      
+      # Clips table - stores clip segments with analysis state
+      self.clips_df = pl.DataFrame(
+        schema={
+          'clip_id': pl.Utf8,  # Primary key: unique identifier for each clip
+          'file_id': pl.Utf8,  # Foreign key to files table
+          'clip_start': pl.Float32,  # Start time of the clip in seconds
+          'clip_end': pl.Float32,    # End time of the clip in seconds
+          'annotation_status': pl.List(pl.Int32),  # Per-class annotation status array
+          'confidence_predictions': pl.List(pl.Float32),  # Per-class confidence scores array
+          'label_strength': pl.List(pl.Int32),  # Per-class label strength array (0=weak, 1=strong)
+          'embedding_index': pl.Int64,  # Index into embeddings array
+          'created_at': pl.Datetime  # When clip was created
+        }
+      )
+      
+      # Annotations table - stores human labels
+      self.annotations_df = pl.DataFrame(
+        schema={
+          'annotation_id': pl.Utf8,  # Primary key: unique identifier for each annotation
+          'clip_id': pl.Utf8,  # Foreign key to clips table
+          'class_name': pl.Utf8,  # Name of the class being annotated
+          'label': pl.Utf8,  # Label: 'present', 'not_present', 'uncertain'
+          'annotated_at': pl.Datetime  # When annotation was made
+        }
+      )
+      
+  def add_file_and_clips(self, 
+                        file_name: str, 
+                        file_path: str, 
+                        duration_sec: float, 
+                        sampling_rate: int,
+                        window_size: float,
+                        embedding_start_index: int = None) -> str:
     """
-    Add an audio embedding to the database.
+    Add a file and create clips for it based on window size.
     
     Args:
-        file_name: Unique identifier for the audio clip
-        file_path: Path to the audio file
-        duration_sec: Duration in seconds
-        clip_start: Start time of the audio clip in seconds
-        clip_end: End time of the audio clip in seconds
+        file_name: Name of the audio file (without path)
+        file_path: Full path to the audio file
+        duration_sec: Total duration of the audio file in seconds
         sampling_rate: Audio sampling rate in Hz
-        score: Predicted classifier score 0-1
-        annotation: Clip annotation state[ 0: target sound not in clip,
-                                           1: target sound in clip,
-                                           3: reviewed but uncertain if the target sound is in the clip,
-                                           4: not yet reviewed]
-        NOT YET IMPLEMENTED embedding: Embedding vector for the audio clip
-        NOT YET IMPLEMENTED metadata: Additional information about the clip
-    """
-    # Check score input 
-    #if score > self.score_max or score < self.score_min:
-    #   raise ValueError(f"Scores should be between {self.score_min} and {self.score_max}")
-    
-    # Check embedding input
-    #if len(embedding) != self.embedding_dim:
-    #    raise ValueError(f"Embedding dimension should be {self.embedding_dim}")
+        window_size: Size of clips to create in seconds
+        embedding_start_index: Starting index for embeddings (None if no embeddings yet)
         
-    #if metadata is None:
-    #    metadata = {}
+    Returns:
+        file_id: The unique identifier for the added file
+    """
+    # Generate unique file ID
+    import uuid
+    file_id = str(uuid.uuid4())
     
-    # ensure data types
+    # Ensure data types
     duration_sec_float32 = np.float32(duration_sec)
-    clip_start_float32 = np.float32(clip_start)
-    clip_end_float32 = np.float32(clip_end)
     sampling_rate_int32 = np.int32(sampling_rate)
-    score_float32 = np.float32(2.0)
-    annotation_int32 = np.int32(4)
     
-    # Initialize multiclass vectors
-    # predictions: initialized to 0.5 for all classes (neutral prediction)
-    initial_predictions = [np.float32(0.5)] * self.num_classes
-    # annotation_status: initialized to 4 for all classes (not yet reviewed)
-    initial_annotation_status = [np.int32(4)] * self.num_classes
-    # label_strength: initialized to 0 for all classes (weak/unlabeled)
-    initial_label_strength = [np.int32(0)] * self.num_classes
-    
-    new_row = pl.DataFrame({
+    # Add file to files table
+    new_file = pl.DataFrame({
+        'file_id': [file_id],
         'file_name': [file_name],
         'file_path': [file_path],
         'duration_sec': [duration_sec_float32],
-        'clip_start': [clip_start_float32],
-        'clip_end': [clip_end_float32],
         'sampling_rate': [sampling_rate_int32],
-        'score': [score_float32], #initialized at a non-real value for initial testing
-        'annotation': [annotation_int32],
-        'predictions': [initial_predictions],
-        'annotation_status': [initial_annotation_status],
-        'label_strength': [initial_label_strength],
-        'embedding_index': [embedding_index],
         'created_at': [datetime.now()]
     })
-
-    self.df = pl.concat([self.df, new_row])
+    
+    self.files_df = pl.concat([self.files_df, new_file])
+    
+    # Create clips for this file
+    clip_start = 0.0
+    embedding_index = embedding_start_index or 0
+    
+    while clip_start < duration_sec:
+        clip_end = min(clip_start + window_size, duration_sec)
+        clip_id = str(uuid.uuid4())
+        
+        # Initialize per-class annotation status (4 = unreviewed), confidence (0.5 = neutral), and label strength (0 = weak)
+        initial_annotation_status = [np.int32(4)] * self.num_classes
+        initial_confidence = [np.float32(0.5)] * self.num_classes
+        initial_label_strength = [np.int32(0)] * self.num_classes
+        
+        new_clip = pl.DataFrame({
+            'clip_id': [clip_id],
+            'file_id': [file_id],
+            'clip_start': [np.float32(clip_start)],
+            'clip_end': [np.float32(clip_end)],
+            'annotation_status': [initial_annotation_status],
+            'confidence_predictions': [initial_confidence],
+            'label_strength': [initial_label_strength],
+            'embedding_index': [embedding_index],
+            'created_at': [datetime.now()]
+        })
+        
+        self.clips_df = pl.concat([self.clips_df, new_clip])
+        
+        clip_start += window_size
+        embedding_index += 1
+    
+    return file_id
 
   def save_db(self, file_path: str) -> None:
-    """Save the database to a file."""
-    self.df.write_parquet(file_path)
+    """Save database using three-table structure."""
+    from pathlib import Path
+    base_path = Path(file_path).parent
+    
+    # Ensure the directory exists
+    base_path.mkdir(parents=True, exist_ok=True)
+    
+    # Save the three tables
+    self.files_df.write_parquet(base_path / "files.parquet")
+    self.clips_df.write_parquet(base_path / "clips.parquet") 
+    self.annotations_df.write_parquet(base_path / "annotations.parquet")
+    
+    # Create metadata file
+    import json
+    metadata = {
+        "database_format": "three_table_v1",
+        "tables": ["files.parquet", "clips.parquet", "annotations.parquet"],
+        "created_at": str(datetime.now()),
+        "num_files": len(self.files_df),
+        "num_clips": len(self.clips_df), 
+        "num_annotations": len(self.annotations_df),
+        "num_classes": self.num_classes
+    }
+    
+    with open(base_path / "database_info.json", 'w') as f:
+        json.dump(metadata, f, indent=2)
   
   def load_db(self, file_path: str) -> None:
-    """Load the database from a file."""
-    if Path(file_path).is_file():
-        self.df = pl.read_parquet(file_path)
+    """Load the three-table database format."""
+    from pathlib import Path
+    base_path = Path(file_path).parent
+    
+    # Load the three tables
+    files_path = base_path / "files.parquet"
+    clips_path = base_path / "clips.parquet"
+    annotations_path = base_path / "annotations.parquet"
+    database_info_path = base_path / "database_info.json"
+    
+    if files_path.exists() and clips_path.exists() and annotations_path.exists():
+        # Load three-table format
+        self.files_df = pl.read_parquet(files_path)
+        self.clips_df = pl.read_parquet(clips_path)
+        self.annotations_df = pl.read_parquet(annotations_path)
         
-        # Handle backward compatibility - add new columns if they don't exist
-        if 'predictions' not in self.df.columns:
-            # Initialize predictions with the current score for all classes
-            predictions_list = []
-            for _ in range(len(self.df)):
-                pred_vector = [np.float32(0.5)] * self.num_classes
-                predictions_list.append(pred_vector)
-            self.df = self.df.with_columns(pl.Series("predictions", predictions_list))
+        # Load metadata if available
+        if database_info_path.exists():
+            import json
+            with open(database_info_path, 'r') as f:
+                metadata = json.load(f)
+                print(f"✓ Loaded database: {metadata.get('num_files', 0)} files, "
+                      f"{metadata.get('num_clips', 0)} clips, "
+                      f"{metadata.get('num_annotations', 0)} annotations")
         
-        if 'annotation_status' not in self.df.columns:
-            # Initialize annotation_status with current annotation for first class, 4 for others
-            annotation_status_list = []
-            current_annotations = self.df['annotation'].to_list()
-            for annotation in current_annotations:
-                status_vector = [np.int32(4)] * self.num_classes
-                status_vector[0] = np.int32(annotation)  # Use current annotation for first class
-                annotation_status_list.append(status_vector)
-            self.df = self.df.with_columns(pl.Series("annotation_status", annotation_status_list))
-        
-        if 'label_strength' not in self.df.columns:
-            # Initialize label_strength with 1 for first class if annotated, 0 for others
-            label_strength_list = []
-            current_annotations = self.df['annotation'].to_list()
-            for annotation in current_annotations:
-                strength_vector = [np.int32(0)] * self.num_classes
-                # If the clip has been annotated (not 4=unreviewed), mark first class as strong
-                if annotation != 4:
-                    strength_vector[0] = np.int32(1)
-                label_strength_list.append(strength_vector)
-            self.df = self.df.with_columns(pl.Series("label_strength", label_strength_list))
-        
-        if 'embedding_index' not in self.df.columns:
-            # Initialize embedding_index as None for all existing clips
-            null_indices = [None] * len(self.df)
-            self.df = self.df.with_columns(pl.Series("embedding_index", null_indices))
     else:
-        raise FileNotFoundError(f"Database file {file_path} not found")
+        raise FileNotFoundError(f"Three-table database not found at {base_path}. "
+                              f"Expected files: files.parquet, clips.parquet, annotations.parquet")
+
   
   def populate_scores(self, scores: List[float]):
-      if len(scores) != len(self.df):
-        raise ValueError(f"Length of new_values ({len(scores)}) must match DataFrame length ({len(self.df)})")
+      """Update confidence predictions for the first class with new scores."""
+      if len(scores) != len(self.clips_df):
+        raise ValueError(f"Length of scores ({len(scores)}) must match clips count ({len(self.clips_df)})")
       
       if any(score > self.score_max or score < self.score_min for score in scores):
         print(f"Warning: Some scores are outside the expected range [{self.score_min}, {self.score_max}]")
       
-      scores_float32 = np.float32(scores)
-      self.df = self.df.with_columns(pl.Series("score", scores_float32))
+      # Update confidence predictions for first class
+      confidence_vectors = self.clips_df['confidence_predictions'].to_list()
+      for i, score in enumerate(scores):
+          if i < len(confidence_vectors) and confidence_vectors[i]:
+              confidence_vectors[i][0] = np.float32(score)
+      
+      self.clips_df = self.clips_df.with_columns(pl.Series("confidence_predictions", confidence_vectors))
   
   def populate_multiclass_predictions(self, predictions: List[List[float]]):
       """
-      Populate the predictions column with multiclass prediction vectors.
+      Populate confidence predictions with multiclass prediction vectors.
       
       Args:
           predictions: List of prediction vectors, one per clip
       """
-      if len(predictions) != len(self.df):
-          raise ValueError(f"Length of predictions ({len(predictions)}) must match DataFrame length ({len(self.df)})")
+      if len(predictions) != len(self.clips_df):
+          raise ValueError(f"Length of predictions ({len(predictions)}) must match clips count ({len(self.clips_df)})")
       
       # Convert to float32 lists
       predictions_float32 = [[np.float32(score) for score in pred_vec] for pred_vec in predictions]
-      self.df = self.df.with_columns(pl.Series("predictions", predictions_float32))
+      self.clips_df = self.clips_df.with_columns(pl.Series("confidence_predictions", predictions_float32))
   
   def populate_embedding_indices(self, embedding_indices: List[int]):
       """
@@ -192,17 +233,17 @@ class Audio_DB:
       Args:
           embedding_indices: List of embedding indices, one per clip (can contain None for missing embeddings)
       """
-      if len(embedding_indices) != len(self.df):
-          raise ValueError(f"Length of embedding indices ({len(embedding_indices)}) must match DataFrame length ({len(self.df)})")
+      if len(embedding_indices) != len(self.clips_df):
+          raise ValueError(f"Length of embedding indices ({len(embedding_indices)}) must match clips count ({len(self.clips_df)})")
       
-      self.df = self.df.with_columns(pl.Series("embedding_index", embedding_indices))
+      self.clips_df = self.clips_df.with_columns(pl.Series("embedding_index", embedding_indices))
   
   def auto_populate_embedding_indices(self):
       """
       Automatically populate embedding indices for existing clips.
       Assumes embeddings are ordered the same as clips in the database (0, 1, 2, ...).
       """
-      num_clips = len(self.df)
+      num_clips = len(self.clips_df)
       indices = list(range(num_clips))
       self.populate_embedding_indices(indices)
       print(f"✓ Populated embedding indices for {num_clips} clips (0 to {num_clips-1})")
@@ -215,7 +256,7 @@ class Audio_DB:
       Args:
           embeddings_count: Number of embeddings available
       """
-      num_clips = len(self.df)
+      num_clips = len(self.clips_df)
       
       if embeddings_count >= num_clips:
           # Enough embeddings for all clips
@@ -233,6 +274,7 @@ class Audio_DB:
   def update_class_scores_and_annotations(self, class_index: int):
       """
       Update the score and annotation columns based on a specific class index.
+      This method is provided for backwards compatibility but doesn't modify the underlying tables.
       
       Args:
           class_index: Index of the class to extract scores and annotations for
@@ -240,56 +282,51 @@ class Audio_DB:
       if class_index >= self.num_classes:
           raise ValueError(f"Class index {class_index} is out of range for {self.num_classes} classes")
       
-      # Extract scores for the specific class
-      scores = self.df['predictions'].list.get(class_index)
-      annotations = self.df['annotation_status'].list.get(class_index)
-      
-      # Update the score and annotation columns
-      self.df = self.df.with_columns([
-          scores.alias("score"),
-          annotations.alias("annotation")
-      ])
+      # This method is called by Active Learning to set up the current class view
+      # The actual score/annotation extraction happens in the df property
+      # Just store the current class index for the property to use
+      self._current_class_index = class_index
   
   def update_class_annotation(self, clip_mask, class_index: int, annotation_value: int):
       """
       Update annotation for a specific class and clip.
+      This method is provided for backwards compatibility and updates the clips table directly.
       
       Args:
-          clip_mask: Boolean mask identifying the clip to update
+          clip_mask: Boolean mask identifying the clip to update (polars Series)
           class_index: Index of the class to update
           annotation_value: New annotation value (0, 1, 3, or 4)
       """
       if class_index >= self.num_classes:
           raise ValueError(f"Class index {class_index} is out of range for {self.num_classes} classes")
       
-      # Get current annotation status and label strength vectors
-      annotation_vectors = self.df['annotation_status'].to_list()
-      label_strength_vectors = self.df['label_strength'].to_list()
+      # Update annotation status in clips table for the matching rows
+      # This is a simplified version that updates the clips table directly
+      if hasattr(clip_mask, 'to_list'):
+          mask_values = clip_mask.to_list()
+      else:
+          mask_values = clip_mask
       
-      # Update the specific class annotation for rows matching the mask
-      mask_values = clip_mask.to_list() if hasattr(clip_mask, 'to_list') else clip_mask
+      # Update annotation_status arrays for matching clips
+      current_annotations = self.clips_df['annotation_status'].to_list()
+      current_strengths = self.clips_df['label_strength'].to_list()
       
       for i, should_update in enumerate(mask_values):
-          if should_update and i < len(annotation_vectors):
-              if len(annotation_vectors[i]) > class_index:
-                  annotation_vectors[i][class_index] = np.int32(annotation_value)
+          if should_update and i < len(current_annotations):
+              if len(current_annotations[i]) > class_index:
+                  current_annotations[i][class_index] = annotation_value
                   
-                  # Update label strength: mark as strong (1) if annotated as present (1) or absent (0)
-                  # Keep as weak (0) if uncertain (3) or unreviewed (4)
+                  # Update label strength
                   if annotation_value in [0, 1]:  # Present or Not Present = strong label
-                      label_strength_vectors[i][class_index] = np.int32(1)
+                      current_strengths[i][class_index] = 1
                   elif annotation_value == 4:  # Unreviewed = reset to weak
-                      label_strength_vectors[i][class_index] = np.int32(0)
-                  # annotation_value == 3 (uncertain) keeps the current strength value
+                      current_strengths[i][class_index] = 0
       
-      # Update the DataFrame
-      self.df = self.df.with_columns([
-          pl.Series("annotation_status", annotation_vectors),
-          pl.Series("label_strength", label_strength_vectors)
+      # Update the clips dataframe with the modified arrays
+      self.clips_df = self.clips_df.with_columns([
+          pl.Series(current_annotations).alias('annotation_status'),
+          pl.Series(current_strengths).alias('label_strength')
       ])
-      
-      # Also update the single annotation column for the current class
-      self.update_class_scores_and_annotations(class_index)
   
   def get_strong_labels_mask(self, class_index: int = None):
       """
@@ -331,47 +368,79 @@ class Audio_DB:
   
   def get_label_statistics(self):
       """
-      Get statistics about strong vs weak labels across all classes.
+      Get statistics about annotations across all classes using the new annotations table.
       
       Returns:
           Dictionary with label statistics
       """
-      total_clips = len(self.df)
+      total_clips = len(self.clips_df)
       
-      def safe_count_true(mask):
-          """Helper to count True values in a mask, handling different data types"""
-          try:
-              return int(mask.sum())
-          except:
-              return mask.to_list().count(True)
+      # Get annotation counts from the annotations table
+      annotation_counts = {}
+      if len(self.annotations_df) > 0:
+          # Count by label type
+          label_counts = self.annotations_df.group_by("label").agg(pl.count("annotation_id").alias("count"))
+          for row in label_counts.iter_rows():
+              annotation_counts[row[0]] = row[1]
       
-      # Count clips with strong labels (any class)
-      strong_mask = self.get_strong_labels_mask()
-      strong_clips = safe_count_true(strong_mask)
+      # Count annotated vs unannotated clips
+      annotated_clip_ids = set()
+      if len(self.annotations_df) > 0:
+          annotated_clip_ids = set(self.annotations_df["clip_id"].to_list())
       
-      # Count clips with only weak labels (all classes)
-      weak_mask = self.get_weak_labels_mask()
-      weak_clips = safe_count_true(weak_mask)
+      annotated_clips = len(annotated_clip_ids)
+      unannotated_clips = total_clips - annotated_clips
       
-      # Per-class statistics
+      # Per-class statistics - count annotations for each class name
       class_stats = {}
+      if len(self.annotations_df) > 0:
+          class_counts = self.annotations_df.group_by(["class_name", "label"]).agg(pl.count("annotation_id").alias("count"))
+          
+          # Organize by class
+          for row in class_counts.iter_rows():
+              class_name = row[0]
+              label = row[1] 
+              count = row[2]
+              
+              if class_name not in class_stats:
+                  class_stats[class_name] = {"present": 0, "not_present": 0, "uncertain": 0}
+              
+              if label in class_stats[class_name]:
+                  class_stats[class_name][label] = count
+      
+      # Convert to the format expected by the frontend
+      # "Strong labels" = present + not_present annotations (definitive annotations)
+      # "Weak labels" = uncertain annotations or no annotations
+      definitive_annotations = annotation_counts.get("present", 0) + annotation_counts.get("not_present", 0)
+      uncertain_annotations = annotation_counts.get("uncertain", 0)
+      
+      # Per-class statistics in the expected format
+      class_stats_formatted = {}
+      class_names = list(set(self.annotations_df["class_name"].to_list())) if len(self.annotations_df) > 0 else []
+      
       for i in range(self.num_classes):
-          strong_mask_i = self.get_strong_labels_mask(i)
-          weak_mask_i = self.get_weak_labels_mask(i)
+          class_key = f"class_{i}"
+          class_name = class_names[i] if i < len(class_names) else None
           
-          class_strong = safe_count_true(strong_mask_i)
-          class_weak = safe_count_true(weak_mask_i)
-          
-          class_stats[f"class_{i}"] = {
-              "strong_labels": class_strong,
-              "weak_labels": class_weak
+          if class_name and class_name in class_stats:
+              # Strong labels = present + not_present for this class
+              strong_count = class_stats[class_name].get("present", 0) + class_stats[class_name].get("not_present", 0)
+              # Weak labels = uncertain for this class
+              weak_count = class_stats[class_name].get("uncertain", 0)
+          else:
+              strong_count = 0
+              weak_count = 0
+              
+          class_stats_formatted[class_key] = {
+              "strong_labels": strong_count,
+              "weak_labels": weak_count
           }
       
       return {
           "total_clips": total_clips,
-          "clips_with_strong_labels": strong_clips,
-          "clips_with_only_weak_labels": weak_clips,
-          "per_class_statistics": class_stats
+          "clips_with_strong_labels": definitive_annotations,  # Clips with definitive annotations
+          "clips_with_only_weak_labels": uncertain_annotations,  # Clips with only uncertain annotations
+          "per_class_statistics": class_stats_formatted
       }
   
   def find_similar_clips(self, embeddings_array: np.ndarray, query_embedding: np.ndarray, 
@@ -449,7 +518,7 @@ class Audio_DB:
   
   def export_wav_clips(self, export_path, annotation_slug, sr=None):
     """
-    Export annotated audio clips as WAV files with label strength information.
+    Export annotated audio clips as WAV files using the three-table structure.
     
     Args:
         export_path (str): Directory path where the WAV files will be saved.
@@ -457,7 +526,7 @@ class Audio_DB:
         sr (int, optional): Sampling rate for the exported files. If None, uses the original sampling rate.
     
     Returns:
-        tuple: (num_positive_exported, num_negative_exported) - Count of positive and negative clips exported
+        tuple: (num_positive_exported, num_negative_exported, num_uncertain_exported) - Count of exported clips by type
     """
     import os
     import librosa
@@ -468,21 +537,23 @@ class Audio_DB:
     # Create the export directory if it doesn't exist
     os.makedirs(export_path, exist_ok=True)
     
-    # Get annotated clips (positive, negative, and uncertain)
-    positive_clips = self.df.filter(pl.col("annotation") == 1)
-    negative_clips = self.df.filter(pl.col("annotation") == 0)
-    uncertain_clips = self.df.filter(pl.col("annotation") == 3)
+    # Get all clips that have annotations using the annotations table
+    annotated_clip_ids = set()
+    if len(self.annotations_df) > 0:
+        annotated_clip_ids = set(self.annotations_df["clip_id"].to_list())
     
-    num_positive = len(positive_clips)
-    num_negative = len(negative_clips)
-    num_uncertain = len(uncertain_clips)
+    # Get clips with files information for annotated clips only
+    all_clips_with_files = self.get_clips_with_files()
+    all_annotated_clips = all_clips_with_files.filter(
+        pl.col("clip_id").is_in(list(annotated_clip_ids))
+    )
     
-    print(f"Found {num_positive} positive clips, {num_negative} negative clips, and {num_uncertain} uncertain clips for export.")
+    num_total = len(all_annotated_clips)
+    print(f"Found {num_total} annotated clips for export.")
+    
     
     # Track successful exports and metadata
-    positive_exported = 0
-    negative_exported = 0
-    uncertain_exported = 0
+    clips_exported = 0
     export_metadata = {
         "export_info": {
             "export_date": datetime.now().isoformat(),
@@ -493,156 +564,249 @@ class Audio_DB:
         "clips": []
     }
     
-    def export_single_clip(row, annotation_type, annotation_slug):
-        """Helper function to export a single clip with complete multiclass metadata"""
+    def export_single_clip(row_dict):
+        """Helper function to export a single clip using the new three-table structure"""
+        nonlocal clips_exported
+        
         # Extract clip details
-        file_path = row['file_path']
-        file_name = row['file_name']
-        clip_start = row['clip_start']
-        clip_end = row['clip_end']
-        original_sr = row['sampling_rate']
+        clip_id = row_dict['clip_id']
+        file_path = row_dict['file_path']
+        file_name = row_dict['file_name']
+        clip_start = row_dict['clip_start']
+        clip_end = row_dict['clip_end']
+        original_sr = row_dict['sampling_rate']
         
-        # Get multiclass information from database
-        predictions = row.get('predictions', [])
-        annotation_status = row.get('annotation_status', [])
-        label_strength = row.get('label_strength', [])
-        current_score = row.get('score', 0.0)
+        # Get annotations for this clip
+        clip_annotations = self.annotations_df.filter(pl.col("clip_id") == clip_id)
         
-        # Create binary label vector and strength vector for all classes
-        if predictions and len(predictions) > 0:
-            # Multiclass case - use vectors from database
-            labels_vector = []
-            strength_vector = []
-            scores_vector = predictions if isinstance(predictions, list) else [current_score]
+        # Build annotations by class name
+        annotations_by_class = {}
+        if len(clip_annotations) > 0:
+            for ann_row in clip_annotations.iter_rows():
+                annotation_id, clip_id_db, class_name, label, annotated_at = ann_row
+                annotations_by_class[class_name] = label
+        
+        # Determine positive classes (those labeled as "present")
+        positive_classes = [class_name for class_name, label in annotations_by_class.items() if label == "present"]
+        
+        # Skip if no annotations at all
+        if not annotations_by_class:
+            print(f"Skipping clip {clip_id} - no annotations found")
+            return
+        
+        try:
+            # Load audio data for the clip
+            audio, _ = librosa.load(file_path, sr=original_sr, offset=clip_start, duration=clip_end-clip_start)
             
-            # Build labels and strengths for each class
-            for i in range(len(predictions)):
-                if i < len(annotation_status):
-                    ann_status = annotation_status[i]
-                    if ann_status == 1:  # Present
-                        labels_vector.append(1)
-                    elif ann_status == 0:  # Not present  
-                        labels_vector.append(0)
-                    elif ann_status == 3:  # Uncertain
-                        labels_vector.append(1)  # Treat uncertain as positive but weak
-                    else:  # Unreviewed or other
-                        labels_vector.append(0)
-                else:
-                    labels_vector.append(0)
-                
-                # Set strength: strong (1) for definitive annotations, weak (0) for uncertain
-                if i < len(label_strength):
-                    strength_vector.append(label_strength[i])
-                elif i < len(annotation_status) and annotation_status[i] == 3:
-                    strength_vector.append(0)  # Uncertain = weak
-                elif i < len(annotation_status) and annotation_status[i] in [0, 1]:
-                    strength_vector.append(1)  # Definitive = strong
-                else:
-                    strength_vector.append(0)  # Default to weak for unreviewed
+            # Resample if needed
+            target_sr = sr or original_sr
+            if target_sr != original_sr:
+                audio = librosa.resample(audio, orig_sr=original_sr, target_sr=target_sr)
+                export_sr = target_sr
+            else:
+                export_sr = original_sr
+            
+            # Create filename based on positive classes
+            if positive_classes:
+                classes_str = "+".join(positive_classes)
+                output_filename = f"{file_name}_{clip_start:.1f}-{classes_str}.wav"
+            else:
+                # No positive classes - this is a negative example
+                output_filename = f"{file_name}_{clip_start:.1f}-empty.wav"
+            
+            output_path = os.path.join(export_path, output_filename)
+            
+            # Save as WAV file
+            sf.write(output_path, audio, export_sr)
+            clips_exported += 1
+            
+            print(f"Exported clip {clips_exported}: {output_filename}")
+            
+            # Add comprehensive metadata for this clip
+            clip_metadata = {
+                "filename": output_filename,
+                "original_file": file_name,
+                "file_path": file_path,
+                "clip_id": clip_id,
+                "clip_start": clip_start,
+                "clip_end": clip_end,
+                "annotation_slug": annotation_slug,
+                "annotations": annotations_by_class,  # All annotations for this clip
+                "positive_classes": positive_classes,  # Classes labeled as present
+                "sampling_rate": export_sr
+            }
+            export_metadata["clips"].append(clip_metadata)
+            
+        except Exception as e:
+            print(f"Error exporting clip {clip_id} from {file_name}: {str(e)}")
+    
+    # Export all annotated clips  
+    positive_count = 0
+    negative_count = 0
+    uncertain_count = 0
+    
+    for i, row in enumerate(all_annotated_clips.iter_rows(named=True)):
+        print(f"Processing clip {i+1}/{num_total}: {row['file_name']} {row['clip_start']}-{row['clip_end']}")
+        
+        # Count annotation types for this clip
+        clip_annotations = self.annotations_df.filter(pl.col("clip_id") == row['clip_id'])
+        has_present = False
+        has_uncertain = False
+        
+        if len(clip_annotations) > 0:
+            for ann_row in clip_annotations.iter_rows():
+                _, _, _, label, _ = ann_row
+                if label == "present":
+                    has_present = True
+                elif label == "uncertain":
+                    has_uncertain = True
+        
+        if has_present:
+            positive_count += 1
+        elif has_uncertain:
+            uncertain_count += 1
         else:
-            # Single class case - legacy support
-            labels_vector = [1 if annotation_type == 1 else 0]
-            strength_vector = [1 if annotation_type in [0, 1] else 0]  # Strong for definitive, weak for uncertain
-            scores_vector = [current_score]
+            negative_count += 1
         
-        # Load audio data for the clip
-        audio, _ = librosa.load(file_path, sr=original_sr, offset=clip_start, duration=clip_end-clip_start)
+        export_single_clip(row)
         
-        # Resample if needed
-        if cfg.TARGET_SR is not None and cfg.TARGET_SR != original_sr:
-            audio = librosa.resample(audio, orig_sr=original_sr, target_sr=cfg.TARGET_SR)
-            export_sr = cfg.TARGET_SR
-        else:
-            export_sr = original_sr
-        
-        # Create simplified filename: original_name_clipstart-annotation_slug-strong.wav
-        # Only use -strong tag to indicate this contains strong labels for the specified class
-        output_filename = f"{file_name}_{clip_start:.1f}-{annotation_slug}-strong.wav"
-        output_path = f"{export_path}/{output_filename}"
-        
-        # Save as WAV file
-        sf.write(output_path, audio, export_sr)
-        
-        # Add comprehensive metadata for this clip
-        clip_metadata = {
-            "filename": output_filename,
-            "original_file": file_name,
-            "clip_start": clip_start,
-            "clip_end": clip_end,
-            "annotation_slug": annotation_slug,
-            "labels": labels_vector,              # Full binary vector for all classes
-            "label_strengths": strength_vector,   # Strength vector for all classes  
-            "scores": scores_vector,              # Prediction scores for all classes
-            "primary_annotation": annotation_type, # Original single annotation for reference
-            "sampling_rate": export_sr
-        }
-        export_metadata["clips"].append(clip_metadata)
-        
-        return output_filename
-    
-    # Export positive clips (annotation = 1)
-    for i, row in enumerate(positive_clips.iter_rows(named=True)):
-        try:
-            export_single_clip(row, 1, annotation_slug)
-            positive_exported += 1
-            
-            if (i+1) % 10 == 0:
-                print(f"Exported {i+1}/{num_positive} positive clips...")
-        
-        except Exception as e:
-            print(f"Error exporting positive clip {row['file_name']}: {str(e)}")
-    
-    # Export negative clips (annotation = 0)
-    for i, row in enumerate(negative_clips.iter_rows(named=True)):
-        try:
-            export_single_clip(row, 0, "empty")
-            negative_exported += 1
-            
-            if (i+1) % 10 == 0:
-                print(f"Exported {i+1}/{num_negative} negative clips...")
-        
-        except Exception as e:
-            print(f"Error exporting negative clip {row['file_name']}: {str(e)}")
-    
-    # Export uncertain clips (annotation = 3) 
-    for i, row in enumerate(uncertain_clips.iter_rows(named=True)):
-        try:
-            export_single_clip(row, 3, "uncertain")
-            uncertain_exported += 1
-            
-            if (i+1) % 10 == 0:
-                print(f"Exported {i+1}/{num_uncertain} uncertain clips...")
-        
-        except Exception as e:
-            print(f"Error exporting uncertain clip {row['file_name']}: {str(e)}")
+        if (i+1) % 10 == 0:
+            print(f"Exported {clips_exported}/{num_total} clips...")
     
     # Update total count in metadata
-    total_exported = positive_exported + negative_exported + uncertain_exported
-    export_metadata["export_info"]["total_clips_exported"] = total_exported
-    export_metadata["export_info"]["positive_clips"] = positive_exported
-    export_metadata["export_info"]["negative_clips"] = negative_exported
-    export_metadata["export_info"]["uncertain_clips"] = uncertain_exported
-    
-    # Add class map information for proper label vector interpretation
-    # Try to get class map from self (database object) if available
-    if hasattr(self, 'class_map') and self.class_map:
-        export_metadata["class_map"] = self.class_map
-    else:
-        # Default single class map
-        export_metadata["class_map"] = {annotation_slug: 0}
+    export_metadata["export_info"]["total_clips_exported"] = clips_exported
+    export_metadata["export_info"]["positive_clips"] = positive_count
+    export_metadata["export_info"]["negative_clips"] = negative_count  
+    export_metadata["export_info"]["uncertain_clips"] = uncertain_count
     
     # Export metadata JSON file
     metadata_path = f"{export_path}/export_metadata.json"
     with open(metadata_path, 'w') as f:
         json.dump(export_metadata, f, indent=2)
     
-    print(f"Exported {total_exported} clips total:")
-    print(f"  - {positive_exported} positive clips")
-    print(f"  - {negative_exported} negative clips") 
-    print(f"  - {uncertain_exported} uncertain clips")
+    print(f"Exported {clips_exported} clips total:")
+    print(f"  - Positive clips: {positive_count}")
+    print(f"  - Negative clips: {negative_count}")
+    print(f"  - Uncertain clips: {uncertain_count}")
     print(f"  - Metadata saved to: {metadata_path}")
     
-    return (positive_exported, negative_exported, uncertain_exported)
+    return (positive_count, negative_count, uncertain_count)
   
-  def empty_method(self):
-      pass
+  # Convenience methods for querying the new structure
+  def get_files_df(self) -> pl.DataFrame:
+      """Get the files DataFrame."""
+      return self.files_df
+      
+  def get_clips_df(self) -> pl.DataFrame:
+      """Get the clips DataFrame."""
+      return self.clips_df
+      
+  def get_annotations_df(self) -> pl.DataFrame:
+      """Get the annotations DataFrame."""
+      return self.annotations_df
+      
+  def get_clips_with_files(self) -> pl.DataFrame:
+      """Get clips joined with file information."""
+      return self.clips_df.join(self.files_df, on="file_id", how="left")
+      
+  def get_clips_with_annotations(self, class_name: str = None) -> pl.DataFrame:
+      """Get clips with their annotations, optionally filtered by class."""
+      annotations = self.annotations_df
+      if class_name:
+          annotations = annotations.filter(pl.col("class_name") == class_name)
+          
+      return self.clips_df.join(
+          annotations,
+          on="clip_id",
+          how="left"
+      ).join(
+          self.files_df,
+          on="file_id", 
+          how="left"
+      )
+  
+  def get_clip_by_legacy_info(self, file_path: str, clip_start: float, clip_end: float) -> pl.DataFrame:
+      """Find clip using legacy file path and time information."""
+      return self.clips_df.join(
+          self.files_df,
+          on="file_id",
+          how="inner"
+      ).filter(
+          (pl.col("file_path") == file_path) &
+          (pl.col("clip_start") == clip_start) &
+          (pl.col("clip_end") == clip_end)
+      )
+  
+  def add_annotation(self, clip_id: str, class_name: str, label: str, annotator_id: str = "user") -> None:
+      """Add or update an annotation for a specific clip and class."""
+      import uuid
+      from datetime import datetime
+      
+      print(f"DEBUG: add_annotation called with clip_id={clip_id}, class_name={class_name}, label={label}")
+      print(f"DEBUG: Current annotations_df columns: {self.annotations_df.columns}")
+      print(f"DEBUG: Current annotations_df schema: {self.annotations_df.schema}")
+      
+      try:
+          # Remove existing annotation for this clip and class
+          print(f"DEBUG: Current annotations_df length: {len(self.annotations_df)}")
+          self.annotations_df = self.annotations_df.filter(
+              ~((pl.col("clip_id") == clip_id) & (pl.col("class_name") == class_name))
+          )
+          print(f"DEBUG: After filtering, annotations_df length: {len(self.annotations_df)}")
+          
+          # Add new annotation - match the existing schema
+          new_annotation = pl.DataFrame({
+              "annotation_id": [str(uuid.uuid4())],
+              "clip_id": [clip_id],
+              "class_name": [class_name], 
+              "label": [label],
+              "annotated_at": [datetime.now()]
+          })
+          
+          print(f"DEBUG: Created new annotation DataFrame with {len(new_annotation)} rows")
+          print(f"DEBUG: New annotation columns: {new_annotation.columns}")
+          print(f"DEBUG: New annotation schema: {new_annotation.schema}")
+          self.annotations_df = pl.concat([self.annotations_df, new_annotation])
+          print(f"DEBUG: Final annotations_df length: {len(self.annotations_df)}")
+          
+      except Exception as e:
+          print(f"ERROR in add_annotation: {e}")
+          raise
+  
+  def get_clip_id_by_legacy_info(self, file_path: str, clip_start: float, clip_end: float) -> str:
+      """Get clip_id using legacy file path and time information."""
+      result = self.get_clip_by_legacy_info(file_path, clip_start, clip_end)
+      if len(result) == 0:
+          raise ValueError(f"No clip found for {file_path} at {clip_start}-{clip_end}")
+      return result["clip_id"][0]
+  
+  @property
+  def df(self):
+      """Backwards compatibility property that creates a legacy-style DataFrame view."""
+      # Join clips with files to get the legacy format
+      legacy_df = self.clips_df.join(self.files_df, on="file_id", how="left")
+      
+      # Get the current class index (default to 0)
+      class_index = getattr(self, '_current_class_index', 0)
+      
+      # Extract scores for the current class
+      if "confidence_predictions" in legacy_df.columns:
+          legacy_df = legacy_df.with_columns(
+              pl.col("confidence_predictions").list.get(class_index).fill_null(0.0).alias("score")
+          )
+      elif "predictions" in legacy_df.columns:
+          legacy_df = legacy_df.with_columns(
+              pl.col("predictions").list.get(class_index).fill_null(0.0).alias("score")
+          )
+      else:
+          legacy_df = legacy_df.with_columns(pl.lit(0.0).alias("score"))
+      
+      # Extract annotation status for the current class
+      if "annotation_status" in legacy_df.columns:
+          legacy_df = legacy_df.with_columns(
+              pl.col("annotation_status").list.get(class_index).fill_null(4).alias("annotation")
+          )
+      else:
+          legacy_df = legacy_df.with_columns(pl.lit(4).alias("annotation"))
+      
+      return legacy_df

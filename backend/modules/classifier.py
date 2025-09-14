@@ -17,14 +17,40 @@ def average_precision(labels, scores):
     ap = np.sum(pr_curve * labels, axis=-1) / np.maximum(np.sum(labels, axis=-1), 1.0)
     return ap
 
-def get_AUC(labels, scores):
+def get_AUC(labels, scores, threshold=0):
     AUCs = []
     for i in range(labels.shape[1]):
         fpr, tpr, thresholds = roc_curve(labels[:, i], scores[:, i])
         AUCs.append(auc(fpr, tpr))
+    
+    # Apply threshold filtering similar to cmap function
+    col_sums = labels.sum(axis=0)
+    mask = col_sums > threshold
+    
+    # Calculate macro AUC only using classes that meet the threshold
+    if np.any(mask):
+        valid_aucs = [AUCs[i] for i in range(len(AUCs)) if mask[i]]
+        macro_auc = np.mean(valid_aucs)
+    else:
+        # If no classes meet threshold, use all classes
+        valid_aucs = AUCs
+        macro_auc = np.mean(AUCs)
+    
+    print(f"DEBUG AUC: threshold={threshold}, col_sums={col_sums}, mask={mask}")
+    print(f"DEBUG AUC: all_aucs={AUCs}, valid_aucs={valid_aucs}, macro_auc={macro_auc}")
+    
+    # Create full-length individual array with N/A for filtered classes
+    individual_aucs = []
+    for i in range(len(AUCs)):
+        if mask[i]:
+            individual_aucs.append(AUCs[i])
+        else:
+            individual_aucs.append(None)  # Will be displayed as N/A in frontend
+    
     return {
-        "macro": np.mean(AUCs),
-        "individual": AUCs,
+        "macro": macro_auc,
+        "mask": mask,
+        "individual": individual_aucs,
     }
 
 def cmap(labels, scores, threshold):  #
@@ -40,16 +66,33 @@ def cmap(labels, scores, threshold):  #
     #    class_aps[i] if sum > 0 else "NA" for i, sum in enumerate(list(col_sums))
     # ]
 
-    # Filter out the "NA" values and calculate the mean of the remaining values
-    valid_aps = [ap for i, ap in enumerate(class_aps) if col_sums[i] > threshold]
-
-    mask = np.sum(labels, axis=0) > threshold
-    macro_cmap = np.mean(class_aps, where=mask)
-    # macro_cmap = np.mean(valid_aps, where=mask)
+    # Filter out classes that don't meet the threshold
+    mask = col_sums > threshold
+    valid_aps = [ap for i, ap in enumerate(class_aps) if mask[i]]
+    
+    # Calculate macro AP using only valid classes
+    if len(valid_aps) > 0:
+        macro_cmap = np.mean(valid_aps)
+    else:
+        # If no classes meet threshold, use all classes
+        valid_aps = class_aps
+        macro_cmap = np.mean(class_aps)
+    
+    print(f"DEBUG CMAP: threshold={threshold}, col_sums={col_sums}, mask={mask}")
+    print(f"DEBUG CMAP: all_aps={class_aps}, valid_aps={valid_aps}, macro_cmap={macro_cmap}")
+    
+    # Create full-length individual array with N/A for filtered classes
+    individual_aps = []
+    for i in range(len(class_aps)):
+        if mask[i]:
+            individual_aps.append(class_aps[i])
+        else:
+            individual_aps.append(None)  # Will be displayed as N/A in frontend
+    
     return {
         "macro": macro_cmap,
         "mask": mask,
-        "individual": valid_aps,
+        "individual": individual_aps,
     }
 
 
@@ -117,7 +160,7 @@ def bce_loss(
     weak_neg_weight: float,
 ) -> tf.Tensor:
   """Binary cross entropy loss from logits with weak negative weights."""
-  y_true = tf.cast(tf.keras.backend.flatten(y_true), tf.float32)
+  y_true = tf.cast(y_true, dtype=logits.dtype)
   log_p = tf.math.log_sigmoid(logits)
   log_not_p = tf.math.log_sigmoid(-logits)
   # optax sigmoid_binary_cross_entropy:

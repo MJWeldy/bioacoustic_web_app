@@ -110,6 +110,11 @@ class AnnotationRequest(BaseModel):
     clip_id: str
     annotation: int  # 0: not present, 1: present, 3: uncertain
 
+class MultiClassAnnotationRequest(BaseModel):
+    clip_id: str
+    annotation: int  # 0: not present, 1: present, 3: uncertain
+    class_index: int  # Specific class to annotate
+
 class SpectrogramRequest(BaseModel):
     file_path: str
     clip_start: float
@@ -124,6 +129,7 @@ class TrainingParams(BaseModel):
     learning_rate: float = 0.001
     model_type: int = 2
     verbose: bool = True
+    weak_neg_weight: float = 0.05
 
 class ModelTrainingConfig(BaseModel):
     model_config = {'protected_namespaces': ()}
@@ -242,28 +248,26 @@ def build_dataset_thread(config: DatasetConfig):
             duration_sec = f.frames / f.samplerate
             file_name = Path(file_path).stem
             
-            # Add clips based on window size
-            clip_start = 0
-            while clip_start < duration_sec:
-                clip_end = min(clip_start + cfg.WINDOW, duration_sec)
-                audio_db.add_clip_row(
-                    file_name=file_name,
-                    file_path=str(file_path),
-                    duration_sec=duration_sec,
-                    clip_start=clip_start,
-                    clip_end=clip_end,
-                    sampling_rate=cfg.TARGET_SR,
-                    embedding_index=embedding_index  # Add embedding index
-                )
-                embedding_index += 1  # Increment for next clip
-                clip_start += cfg.WINDOW
+            # Add file and clips using new structure
+            audio_db.add_file_and_clips(
+                file_name=file_name,
+                file_path=str(file_path),
+                duration_sec=duration_sec,
+                sampling_rate=cfg.TARGET_SR,
+                window_size=cfg.WINDOW,
+                embedding_start_index=embedding_index
+            )
+            
+            # Calculate how many clips were created for this file
+            clips_in_file = int(np.ceil(duration_sec / cfg.WINDOW))
+            embedding_index += clips_in_file
         
         app_state["audio_db"] = audio_db
         
         building_state["message"] = "Saving database..."
         building_state["progress"] = 95
         
-        # Save database
+        # Save database (will save all three tables)
         db_path = Path(config.save_path) / "audio_database.parquet"
         audio_db.save_db(str(db_path))
         
@@ -283,7 +287,7 @@ def build_dataset_thread(config: DatasetConfig):
             "class_map": {item.name: item.value for item in config.class_map},
             "statistics": {
                 "total_files": len(files),
-                "total_clips": len(audio_db.df),
+                "total_clips": len(audio_db.clips_df),
                 "window_size": cfg.WINDOW,
                 "sample_rate": cfg.TARGET_SR
             },
@@ -309,10 +313,10 @@ def build_dataset_thread(config: DatasetConfig):
         labels_info = f" with labels extracted from filenames" if config.is_evaluation_dataset else ""
         
         building_state["status"] = "completed"
-        building_state["message"] = f"{dataset_type.title()} dataset created with {len(files)} files and {len(audio_db.df)} clips{labels_info}"
+        building_state["message"] = f"{dataset_type.title()} dataset created with {len(files)} files and {len(audio_db.clips_df)} clips{labels_info}"
         building_state["progress"] = 100
         building_state["files_count"] = len(files)
-        building_state["clips_count"] = len(audio_db.df)
+        building_state["clips_count"] = len(audio_db.clips_df)
         building_state["is_evaluation_dataset"] = config.is_evaluation_dataset
         building_state["has_labels"] = config.is_evaluation_dataset and labels is not None
         
@@ -396,7 +400,7 @@ async def get_dataset_status():
     
     status = {
         "loaded": True,
-        "clips_count": len(app_state["audio_db"].df),
+        "clips_count": len(app_state["audio_db"].clips_df),
         "backend_model": app_state["backend_model"],
         "class_map": app_state["class_map"],
         "has_classifier": app_state["classifier_model"] is not None
@@ -421,15 +425,16 @@ async def get_available_classes():
     """Get available classes for multiclass selection"""
     if app_state["class_map"] is None:
         raise HTTPException(status_code=400, detail="No dataset loaded")
-    
+
     # Convert class map to list of options sorted by value
     classes = [{"name": name, "value": value} for name, value in app_state["class_map"].items()]
     classes.sort(key=lambda x: x["value"])
-    
+
     return {
         "classes": classes,
         "current_class": app_state.get("current_class_index", 0)
     }
+
 
 @app.post("/api/active-learning/select-class")
 async def select_class(class_index: int):
@@ -469,7 +474,7 @@ class ReviewModeRequest(BaseModel):
 @app.post("/api/active-learning/set-review-mode")
 async def set_review_mode(request: ReviewModeRequest):
     """Set the review mode for clip selection"""
-    valid_modes = ["random", "top_down"]
+    valid_modes = ["random", "top_down", "top_10+score_quantiles"]
     
     if request.review_mode not in valid_modes:
         raise HTTPException(
@@ -508,15 +513,22 @@ async def get_database_info():
         raise HTTPException(status_code=400, detail="No dataset loaded")
     
     try:
-        df = app_state["audio_db"].df
+        # Use legacy df for backwards compatibility, but also include new structure info
+        audio_db = app_state["audio_db"]
+        df = audio_db.df if audio_db.df is not None else audio_db.clips_df
         
         # Get basic info
         info = {
             "total_rows": len(df),
             "columns": df.columns,
             "schema": {col: str(df.schema[col]) for col in df.columns},
-            "num_classes": getattr(app_state["audio_db"], "num_classes", 1),
-            "class_map": app_state.get("class_map", {})
+            "num_classes": getattr(audio_db, "num_classes", 1),
+            "class_map": app_state.get("class_map", {}),
+            "new_structure": {
+                "files_count": len(audio_db.files_df),
+                "clips_count": len(audio_db.clips_df),
+                "annotations_count": len(audio_db.annotations_df)
+            }
         }
         
         return {"status": "success", "info": info}
@@ -536,7 +548,9 @@ async def get_database_data(
         raise HTTPException(status_code=400, detail="No dataset loaded")
     
     try:
-        df = app_state["audio_db"].df
+        # Use legacy df for database viewer compatibility
+        audio_db = app_state["audio_db"]
+        df = audio_db.df if audio_db.df is not None else audio_db.clips_df
         
         # Apply column selection
         if columns:
@@ -601,7 +615,9 @@ async def get_column_statistics(column: str):
         raise HTTPException(status_code=400, detail="No dataset loaded")
     
     try:
-        df = app_state["audio_db"].df
+        # Use legacy df for database viewer compatibility
+        audio_db = app_state["audio_db"]
+        df = audio_db.df if audio_db.df is not None else audio_db.clips_df
         
         if column not in df.columns:
             raise HTTPException(status_code=400, detail=f"Column '{column}' not found")
@@ -634,6 +650,216 @@ async def get_column_statistics(column: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# New API endpoints demonstrating three-table structure capabilities
+@app.get("/api/database/files")
+async def get_files():
+    """Get all files in the database"""
+    if app_state["audio_db"] is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded")
+    
+    try:
+        audio_db = app_state["audio_db"]
+        files_df = audio_db.get_files_df()
+        
+        return {
+            "status": "success", 
+            "files": files_df.to_dicts()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/database/clips-with-annotations")
+async def get_clips_with_annotations(class_name: str = None):
+    """Get clips with their annotations, optionally filtered by class"""
+    if app_state["audio_db"] is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded")
+    
+    try:
+        audio_db = app_state["audio_db"]
+        clips_df = audio_db.get_clips_with_annotations(class_name)
+        
+        return {
+            "status": "success", 
+            "clips": clips_df.to_dicts()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/database/review-clips")
+async def get_review_clips():
+    """Get clips that contain at least one label (for review)"""
+    if app_state["audio_db"] is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded")
+    
+    try:
+        audio_db = app_state["audio_db"]
+        
+        # Get clips that have any annotations
+        annotated_clip_ids = audio_db.annotations_df.select("clip_id").unique()
+        
+        # Join with clips and files to get full information
+        review_clips = audio_db.clips_df.join(
+            annotated_clip_ids,
+            on="clip_id",
+            how="inner"
+        ).join(
+            audio_db.files_df,
+            on="file_id",
+            how="left"
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Found {len(review_clips)} clips with annotations for review",
+            "clips": review_clips.to_dicts()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/database/annotation-summary")
+async def get_annotation_summary():
+    """Get summary statistics about annotations across all classes"""
+    if app_state["audio_db"] is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded")
+    
+    try:
+        audio_db = app_state["audio_db"]
+        
+        # Get annotation counts by class and label
+        annotation_summary = {}
+        
+        for row in audio_db.annotations_df.iter_rows(named=True):
+            class_name = row['class_name']
+            label = row['label']
+            
+            if class_name not in annotation_summary:
+                annotation_summary[class_name] = {
+                    "present": 0,
+                    "not_present": 0, 
+                    "uncertain": 0,
+                    "total": 0
+                }
+            
+            annotation_summary[class_name][label] += 1
+            annotation_summary[class_name]["total"] += 1
+        
+        # Add overall statistics
+        total_files = len(audio_db.files_df)
+        total_clips = len(audio_db.clips_df)
+        total_annotations = len(audio_db.annotations_df)
+        annotated_clips = len(audio_db.annotations_df.select("clip_id").unique())
+        
+        return {
+            "status": "success",
+            "summary": {
+                "database_structure": {
+                    "total_files": total_files,
+                    "total_clips": total_clips,
+                    "total_annotations": total_annotations,
+                    "annotated_clips": annotated_clips,
+                    "unannotated_clips": total_clips - annotated_clips
+                },
+                "annotations_by_class": annotation_summary
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Table-specific data endpoints for Database Viewer
+@app.get("/api/database/table-data")
+async def get_table_data(
+    table: str = "clips",
+    limit: int = 100,
+    offset: int = 0,
+    columns: str = None,
+    filter_column: str = None,
+    filter_value: str = None
+):
+    """Get data from a specific database table"""
+    if app_state["audio_db"] is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded")
+    
+    try:
+        audio_db = app_state["audio_db"]
+        
+        # Select the appropriate table/view
+        if table == "files":
+            df = audio_db.files_df
+        elif table == "clips": 
+            df = audio_db.clips_df
+        elif table == "annotations":
+            df = audio_db.annotations_df
+        elif table == "clips_with_files":
+            df = audio_db.get_clips_with_files()
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown table: {table}")
+        
+        # Apply column selection
+        if columns:
+            selected_columns = [col.strip() for col in columns.split(",")]
+            available_columns = [col for col in selected_columns if col in df.columns]
+            if available_columns:
+                df = df.select(available_columns)
+        
+        # Apply filtering
+        if filter_column and filter_value and filter_column in df.columns:
+            df = df.filter(pl.col(filter_column).cast(pl.Utf8).str.contains(filter_value))
+        
+        # Get total count before pagination
+        total_rows = len(df)
+        
+        # Apply pagination
+        if offset > 0:
+            df = df.slice(offset, limit)
+        else:
+            df = df.head(limit)
+        
+        # Convert to dict format for frontend
+        data = df.to_dicts()
+        
+        return {
+            "status": "success",
+            "data": data,
+            "total_rows": total_rows,
+            "table": table
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/database/table-info")  
+async def get_table_info(table: str = "clips"):
+    """Get schema info for a specific table"""
+    if app_state["audio_db"] is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded")
+    
+    try:
+        audio_db = app_state["audio_db"]
+        
+        # Select the appropriate table
+        if table == "files":
+            df = audio_db.files_df
+        elif table == "clips":
+            df = audio_db.clips_df  
+        elif table == "annotations":
+            df = audio_db.annotations_df
+        elif table == "clips_with_files":
+            df = audio_db.get_clips_with_files()
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown table: {table}")
+        
+        info = {
+            "table": table,
+            "total_rows": len(df),
+            "columns": df.columns,
+            "schema": {col: str(df.schema[col]) for col in df.columns}
+        }
+        
+        return {"status": "success", "info": info}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Active Learning endpoints
 @app.post("/api/active-learning/populate-embedding-indices")
 async def populate_embedding_indices():
@@ -648,21 +874,29 @@ async def populate_embedding_indices():
         # Auto-populate embedding indices (0, 1, 2, ...)
         audio_db.auto_populate_embedding_indices()
         
-        return {"status": "success", "message": f"Populated embedding indices for {len(audio_db.df)} clips"}
+        return {"status": "success", "message": f"Populated embedding indices for {len(audio_db.clips_df)} clips"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/active-learning/load-dataset")
 async def load_dataset(dataset_path: str):
     """Load an existing dataset for active learning"""
+    print(f"DEBUG: load_dataset called with path: {dataset_path}")
     try:
         dataset_path = Path(dataset_path)
-        db_path = dataset_path / "audio_database.parquet"
+        
+        # Check for new three-table format
+        files_path = dataset_path / "files.parquet"
+        clips_path = dataset_path / "clips.parquet"
+        annotations_path = dataset_path / "annotations.parquet"
         embeddings_path = dataset_path / "embeddings.pkl"
         metadata_path = dataset_path / "metadata.json"
         
-        if not db_path.exists():
-            raise HTTPException(status_code=404, detail="Database file not found")
+        # Use fake db_path for compatibility with existing logic
+        db_path = dataset_path / "audio_database.parquet"
+        
+        if not (files_path.exists() and clips_path.exists() and annotations_path.exists()):
+            raise HTTPException(status_code=404, detail="Three-table database files not found. Expected: files.parquet, clips.parquet, annotations.parquet")
         
         # Load metadata if available
         metadata = None
@@ -682,7 +916,11 @@ async def load_dataset(dataset_path: str):
         # Load database with number of classes from metadata
         num_classes = len(metadata.get("class_map", {})) if metadata else 1
         audio_db = db.Audio_DB(num_classes=num_classes)
-        audio_db.load_db(str(db_path))
+        
+        # Load from the three-table structure using load_db method
+        # Pass any file path from the dataset directory - load_db will find the three tables
+        audio_db.load_db(str(files_path))
+        
         app_state["audio_db"] = audio_db
         
         # Load embeddings
@@ -705,7 +943,7 @@ async def load_dataset(dataset_path: str):
         
         return {
             "status": "success",
-            "clips_count": len(audio_db.df),
+            "clips_count": len(audio_db.clips_df),
             "message": message,
             "metadata": metadata
         }
@@ -740,15 +978,18 @@ async def load_classifier(classifier_path: str):
                 print(f"DEBUG: Starting frame-wise processing for {len(embeddings_list)} embedding tensors")
                 
                 # Get database info to understand clip structure
-                db_df = app_state["audio_db"].df
-                total_clips = len(db_df)
+                audio_db = app_state["audio_db"]
+                total_clips = len(audio_db.clips_df)
                 print(f"DEBUG: Database has {total_clips} clips")
                 
                 # Get frame-wise predictions for all embeddings and map to clips
                 all_clip_predictions = []
                 
+                # Get clips with file information
+                clips_with_files = audio_db.get_clips_with_files()
+                
                 # Get unique files and their clips
-                file_groups = db_df.group_by("file_name", maintain_order=True)
+                file_groups = clips_with_files.group_by("file_name", maintain_order=True)
                 
                 for file_idx, (file_group_key, file_clips_df) in enumerate(file_groups):
                     if file_idx >= len(embeddings_list):
@@ -862,8 +1103,19 @@ async def get_clips(filter_config: FilterConfig):
         # Get the next clip based on review mode
         next_clip = annotation_interface.get_next_clip()
         
-        # Convert filtered dataframe to list of dicts
-        clips = filtered_df.to_dicts()
+        # Convert filtered dataframe to list of dicts with proper type conversion
+        clips = []
+        for row_dict in filtered_df.to_dicts():
+            # Convert numpy/polars types to native Python types
+            converted_dict = {}
+            for key, value in row_dict.items():
+                if hasattr(value, 'item'):  # numpy scalar
+                    converted_dict[key] = value.item()
+                elif isinstance(value, list) and len(value) > 0 and hasattr(value[0], 'item'):  # numpy array elements
+                    converted_dict[key] = [v.item() if hasattr(v, 'item') else v for v in value]
+                else:
+                    converted_dict[key] = value
+            clips.append(converted_dict)
         
         return {
             "clips": clips,
@@ -883,35 +1135,108 @@ async def annotate_clip(request: AnnotationRequest):
         raise HTTPException(status_code=400, detail="No dataset loaded")
     
     try:
-        # Parse clip_id to get file info
-        parts = request.clip_id.split("|")
-        if len(parts) != 3:
-            raise HTTPException(status_code=400, detail="Invalid clip_id format")
+        # Check if clip_id is in new UUID format or legacy format
+        if "|" in request.clip_id:
+            # Legacy format: file_path|clip_start|clip_end
+            parts = request.clip_id.split("|")
+            if len(parts) != 3:
+                raise HTTPException(status_code=400, detail="Invalid legacy clip_id format")
+            
+            file_path, clip_start_str, clip_end_str = parts
+            clip_start = float(clip_start_str)
+            clip_end = float(clip_end_str)
+            
+            # Get the actual clip_id from the three-table structure
+            clip_id = app_state["audio_db"].get_clip_id_by_legacy_info(file_path, clip_start, clip_end)
+        else:
+            # New UUID format - use directly
+            clip_id = request.clip_id
         
-        file_path, clip_start_str, clip_end_str = parts
-        clip_start = float(clip_start_str)
-        clip_end = float(clip_end_str)
+        # Convert annotation value to semantic label
+        annotation_map = {0: "not_present", 1: "present", 2: "uncertain", 4: "not_reviewed"}
+        label = annotation_map.get(request.annotation, "not_reviewed")
         
-        # Update annotation in database for multiclass
-        mask = (
-            (app_state["audio_db"].df["file_path"] == file_path) &
-            (app_state["audio_db"].df["clip_start"] == clip_start) &
-            (app_state["audio_db"].df["clip_end"] == clip_end)
-        )
-        
-        # Update the single annotation column (for backward compatibility)
-        update_col = pl.when(mask).then(request.annotation).otherwise(pl.col("annotation"))
-        app_state["audio_db"].df = app_state["audio_db"].df.with_columns(
-            update_col.alias("annotation")
-        )
-        
-        # Update multiclass annotation if current class is selected
+        # Get current class information
         current_class_index = app_state.get("current_class_index", 0)
-        if app_state["audio_db"] and hasattr(app_state["audio_db"], 'update_class_annotation'):
-            app_state["audio_db"].update_class_annotation(mask, current_class_index, request.annotation)
+        if app_state["class_map"] is None:
+            raise HTTPException(status_code=400, detail="No class map available")
         
-        return {"status": "success", "message": "Annotation updated"}
+        class_names = list(app_state["class_map"].keys())
+        if current_class_index >= len(class_names):
+            raise HTTPException(status_code=400, detail="Invalid class index")
         
+        class_name = class_names[current_class_index]
+        
+        # Add annotation to the database
+        print(f"DEBUG: Adding annotation - clip_id: {clip_id}, class_name: {class_name}, label: {label}")
+        app_state["audio_db"].add_annotation(clip_id, class_name, label)
+        
+        # Auto-save the database after annotation
+        dataset_path = app_state.get("dataset_path")
+        if dataset_path:
+            db_path = Path(dataset_path) / "audio_database.parquet"
+            app_state["audio_db"].save_db(str(db_path))
+            print(f"DEBUG: Auto-saved database to {db_path}")
+        
+        return {"status": "success", "message": "Annotation updated and saved"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/active-learning/annotate-class")
+async def annotate_specific_class(request: MultiClassAnnotationRequest):
+    """Annotate a specific class for a clip"""
+    print(f"DEBUG: Received multi-class annotation request - clip_id: {request.clip_id}, annotation: {request.annotation}, class_index: {request.class_index}")
+    if app_state["audio_db"] is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded")
+
+    try:
+        # Check if clip_id is in new UUID format or legacy format
+        if "|" in request.clip_id:
+            # Legacy format: file_path|clip_start|clip_end
+            parts = request.clip_id.split("|")
+            if len(parts) != 3:
+                raise HTTPException(status_code=400, detail="Invalid legacy clip_id format")
+
+            file_path, clip_start_str, clip_end_str = parts
+            clip_start = float(clip_start_str)
+            clip_end = float(clip_end_str)
+
+            # Get the actual clip_id from the three-table structure
+            clip_id = app_state["audio_db"].get_clip_id_by_legacy_info(file_path, clip_start, clip_end)
+            if clip_id is None:
+                raise HTTPException(status_code=404, detail="Clip not found")
+        else:
+            # New UUID format - use directly
+            clip_id = request.clip_id
+
+        # Convert annotation value to semantic label
+        annotation_map = {0: "not_present", 1: "present", 2: "uncertain", 4: "not_reviewed"}
+        label = annotation_map.get(request.annotation, "not_reviewed")
+
+        # Get class information
+        if app_state["class_map"] is None:
+            raise HTTPException(status_code=400, detail="No class map available")
+
+        class_names = list(app_state["class_map"].keys())
+        if request.class_index >= len(class_names) or request.class_index < 0:
+            raise HTTPException(status_code=400, detail="Invalid class index")
+
+        class_name = class_names[request.class_index]
+
+        # Add annotation to the database
+        print(f"DEBUG: Adding annotation - clip_id: {clip_id}, class_name: {class_name}, label: {label}")
+        app_state["audio_db"].add_annotation(clip_id, class_name, label)
+
+        # Auto-save the database after annotation
+        dataset_path = app_state.get("dataset_path")
+        if dataset_path:
+            db_path = Path(dataset_path) / "audio_database.parquet"
+            app_state["audio_db"].save_db(str(db_path))
+            print(f"DEBUG: Auto-saved database to {db_path}")
+
+        return {"status": "success", "message": f"Annotation updated for class '{class_name}' and saved"}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -922,41 +1247,46 @@ async def annotate_other_classes_as_absent(request: AnnotationRequest):
         raise HTTPException(status_code=400, detail="No dataset loaded")
     
     try:
-        # Parse clip_id to get file info
-        parts = request.clip_id.split("|")
-        if len(parts) != 3:
-            raise HTTPException(status_code=400, detail="Invalid clip_id format")
-        
-        file_path, clip_start_str, clip_end_str = parts
-        clip_start = float(clip_start_str)
-        clip_end = float(clip_end_str)
-        
-        # Create mask for the clip
-        mask = (
-            (app_state["audio_db"].df["file_path"] == file_path) &
-            (app_state["audio_db"].df["clip_start"] == clip_start) &
-            (app_state["audio_db"].df["clip_end"] == clip_end)
-        )
+        # Check if clip_id is in new UUID format or legacy format  
+        if "|" in request.clip_id:
+            # Legacy format: file_path|clip_start|clip_end
+            parts = request.clip_id.split("|")
+            if len(parts) != 3:
+                raise HTTPException(status_code=400, detail="Invalid legacy clip_id format")
+            
+            file_path, clip_start_str, clip_end_str = parts
+            clip_start = float(clip_start_str)
+            clip_end = float(clip_end_str)
+            
+            # Get the actual clip_id from the three-table structure
+            clip_id = app_state["audio_db"].get_clip_id_by_legacy_info(file_path, clip_start, clip_end)
+        else:
+            # New UUID format - use directly
+            clip_id = request.clip_id
         
         current_class_index = app_state.get("current_class_index", 0)
-        num_classes = len(app_state.get("class_map", {}))
+        if app_state["class_map"] is None:
+            raise HTTPException(status_code=400, detail="No class map available")
         
-        # Check if required columns exist
-        required_columns = ['annotation_status', 'label_strength']
-        missing_columns = [col for col in required_columns if col not in app_state["audio_db"].df.columns]
-        if missing_columns:
-            raise HTTPException(status_code=500, detail=f"Database missing required columns: {missing_columns}")
+        class_names = list(app_state["class_map"].keys())
         
-        # Mark all other classes as "not present" (0)
+        # Mark all other classes as "not present"
         classes_updated = 0
-        for class_idx in range(num_classes):
+        for class_idx, class_name in enumerate(class_names):
             if class_idx != current_class_index:
-                app_state["audio_db"].update_class_annotation(mask, class_idx, 0)
+                app_state["audio_db"].add_annotation(clip_id, class_name, "not_present")
                 classes_updated += 1
+        
+        # Auto-save the database after annotations
+        dataset_path = app_state.get("dataset_path")
+        if dataset_path:
+            db_path = Path(dataset_path) / "audio_database.parquet"
+            app_state["audio_db"].save_db(str(db_path))
+            print(f"DEBUG: Auto-saved database after annotating {classes_updated} other classes")
         
         return {
             "status": "success", 
-            "message": f"Marked {classes_updated} other classes as 'Not Present'",
+            "message": f"Marked {classes_updated} other classes as 'Not Present' and saved",
             "classes_updated": classes_updated,
             "current_class": current_class_index
         }
@@ -966,81 +1296,65 @@ async def annotate_other_classes_as_absent(request: AnnotationRequest):
 
 @app.get("/api/active-learning/clip-labels")
 async def get_clip_labels(clip_id: str):
-    """Get all class labels for a specific clip"""
+    """Get all class labels for a specific clip using the new three-table structure"""
     if app_state["audio_db"] is None:
         raise HTTPException(status_code=400, detail="No dataset loaded")
     
     try:
-        # Parse clip_id to get file info
-        parts = clip_id.split("|")
-        if len(parts) != 3:
-            raise HTTPException(status_code=400, detail="Invalid clip_id format")
+        print(f"DEBUG: get_clip_labels called with clip_id: {clip_id}")
         
-        file_path, clip_start_str, clip_end_str = parts
-        clip_start = float(clip_start_str)
-        clip_end = float(clip_end_str)
-        
-        # Find the clip
-        mask = (
-            (app_state["audio_db"].df["file_path"] == file_path) &
-            (app_state["audio_db"].df["clip_start"] == clip_start) &
-            (app_state["audio_db"].df["clip_end"] == clip_end)
+        # Get annotations for this clip from the annotations table
+        clip_annotations = app_state["audio_db"].annotations_df.filter(
+            pl.col("clip_id") == clip_id
         )
         
-        clip_data = app_state["audio_db"].df.filter(mask)
-        if len(clip_data) == 0:
-            raise HTTPException(status_code=404, detail="Clip not found")
-        
-        # Get the first (and should be only) matching clip
-        clip_row = clip_data.to_dicts()[0]
-        
-        # Extract annotation status and label strength for all classes
-        annotation_status = clip_row.get("annotation_status", [])
-        label_strength = clip_row.get("label_strength", [])
+        print(f"DEBUG: Found {len(clip_annotations)} annotations for clip {clip_id}")
         
         # Build class information
         class_map = app_state.get("class_map", {})
         class_names = list(class_map.keys())
+        current_class_index = app_state.get("current_class_index", 0)
         
         class_labels = []
-        for i in range(len(annotation_status)):
-            class_name = class_names[i] if i < len(class_names) else f"Class_{i}"
-            status = annotation_status[i] if i < len(annotation_status) else 4
-            strength = label_strength[i] if i < len(label_strength) else 0
+        
+        # Create a dict of annotations by class name for quick lookup
+        annotations_by_class = {}
+        if len(clip_annotations) > 0:
+            for row in clip_annotations.iter_rows():
+                annotation_id, clip_id_db, class_name, label, annotated_at = row
+                annotations_by_class[class_name] = label
+        
+        print(f"DEBUG: Annotations by class: {annotations_by_class}")
+        
+        # Build labels for all classes
+        for i, class_name in enumerate(class_names):
+            annotation_label = annotations_by_class.get(class_name)
             
-            # Determine label text
-            if strength == 1:  # Strong label
-                if status == 1:
-                    label_text = "Present (Strong)"
-                elif status == 0:
-                    label_text = "Not Present (Strong)"
-                else:
-                    label_text = f"Status {status} (Strong)"
-            else:  # Weak label
-                if status == 3:
-                    label_text = "Uncertain (Weak)"
-                elif status == 4:
-                    label_text = "Unreviewed (Weak)"
-                else:
-                    label_text = "Weak"
+            # Determine label text based on annotation
+            if annotation_label == "present":
+                label_text = "Present"
+            elif annotation_label == "not_present":
+                label_text = "Not Present"
+            elif annotation_label == "uncertain":
+                label_text = "Uncertain"
+            else:
+                label_text = "Unlabelled"
             
             class_labels.append({
-                "class_index": i,
                 "class_name": class_name,
-                "annotation_status": status,
-                "label_strength": strength,
                 "label_text": label_text,
-                "is_current": i == app_state.get("current_class_index", 0)
+                "is_current": i == current_class_index
             })
+        
+        print(f"DEBUG: Returning class_labels: {class_labels}")
         
         return {
             "status": "success",
-            "clip_id": clip_id,
-            "class_labels": class_labels,
-            "current_class_index": app_state.get("current_class_index", 0)
+            "class_labels": class_labels
         }
         
     except Exception as e:
+        print(f"ERROR in get_clip_labels: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/active-learning/save-database")
@@ -1059,7 +1373,7 @@ async def save_database():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/active-learning/export-clips")
-async def export_clips(export_path: str, annotation_slug: str):
+async def export_clips(export_path: str, annotation_slug: str = "export"):
     """Export annotated clips as WAV files with enhanced metadata"""
     if app_state["audio_db"] is None:
         raise HTTPException(status_code=400, detail="No dataset loaded")
@@ -1200,53 +1514,134 @@ async def get_audio_clip(file_path: str, clip_start: float, clip_end: float):
 async def load_evaluation_dataset(dataset_path: str):
     """Load evaluation dataset with embeddings and labels"""
     try:
+        print(f"DEBUG: Starting evaluation dataset load for path: {dataset_path}")
+        
         dataset_path = Path(dataset_path)
+        print(f"DEBUG: Checking if dataset path exists: {dataset_path}")
         if not dataset_path.exists():
+            print(f"DEBUG: Dataset path not found: {dataset_path}")
             raise HTTPException(status_code=404, detail="Dataset path not found")
         
+        print(f"DEBUG: Dataset path exists, loading metadata...")
         # Load metadata if available
         metadata_path = dataset_path / "metadata.json"
         metadata = None
         if metadata_path.exists():
+            print(f"DEBUG: Loading metadata from {metadata_path}")
             with open(metadata_path, "r") as f:
                 metadata = json.load(f)
             
             # Verify this is an evaluation dataset
             dataset_type = metadata.get("dataset_info", {}).get("dataset_type", "")
+            print(f"DEBUG: Dataset type from metadata: '{dataset_type}'")
             if dataset_type != "evaluation":
+                print(f"DEBUG: Invalid dataset type: {dataset_type}")
                 raise HTTPException(status_code=400, detail="Dataset is not an evaluation dataset")
             
             # Store class map for evaluation
             if "class_map" in metadata:
                 eval_state["eval_class_map"] = metadata["class_map"]
+                print(f"DEBUG: Stored class map: {metadata['class_map']}")
+        else:
+            print(f"DEBUG: No metadata file found at {metadata_path}")
         
         # Load embeddings file
         embeddings_path = dataset_path / "embeddings.pkl"
+        print(f"DEBUG: Checking for embeddings file at {embeddings_path}")
         if not embeddings_path.exists():
+            print(f"DEBUG: Embeddings file not found: {embeddings_path}")
             raise HTTPException(status_code=404, detail="Embeddings file not found")
         
+        print(f"DEBUG: Loading embeddings from {embeddings_path}")
         with open(embeddings_path, "rb") as f:
             embeddings_data = pickle.load(f)
+        
+        print(f"DEBUG: Embeddings data type: {type(embeddings_data)}")
+        print(f"DEBUG: Embeddings data keys: {list(embeddings_data.keys()) if isinstance(embeddings_data, dict) else 'not a dict'}")
         
         # Check if it's an evaluation dataset (has labels)
         if isinstance(embeddings_data, dict) and 'embeddings' in embeddings_data and 'labels' in embeddings_data:
             embeddings = embeddings_data['embeddings']
             labels = embeddings_data['labels']
+            print(f"DEBUG: Found embeddings shape: {embeddings.shape if hasattr(embeddings, 'shape') else type(embeddings)}")
+            print(f"DEBUG: Found labels shape: {labels.shape if hasattr(labels, 'shape') else type(labels)}")
+            
+            # Check for file information in embeddings data
+            file_info = None
+            if 'file_names' in embeddings_data:
+                file_info = embeddings_data['file_names']
+                print(f"DEBUG: Found file_names in embeddings data: {len(file_info)} files")
+            elif 'filenames' in embeddings_data:
+                file_info = embeddings_data['filenames'] 
+                print(f"DEBUG: Found filenames in embeddings data: {len(file_info)} files")
+            elif 'files' in embeddings_data:
+                file_info = embeddings_data['files']
+                print(f"DEBUG: Found files in embeddings data: {len(file_info)} files")
+            else:
+                print(f"DEBUG: No file information found in embeddings data")
+                
         else:
+            print(f"DEBUG: Invalid embeddings data structure")
             raise HTTPException(status_code=400, detail="Dataset is not an evaluation dataset (no labels found)")
         
-        # Load audio database to get class structure
+        # Load audio database to get class structure (optional for evaluation)
         db_path = dataset_path / "audio_database.parquet"
-        if not db_path.exists():
-            raise HTTPException(status_code=404, detail="Audio database not found")
+        files_path = dataset_path / "files.parquet"
+        clips_path = dataset_path / "clips.parquet"
         
-        # Load minimal database info to get class structure
-        audio_db = db.Audio_DB()
-        audio_db.load_db(str(db_path))
+        print(f"DEBUG: Checking for audio database at {db_path}")
+        print(f"DEBUG: Checking for files.parquet at {files_path}")  
+        print(f"DEBUG: Checking for clips.parquet at {clips_path}")
+        
+        files_df = None
+        clips_df = None
+        
+        # Try to load separate parquet files first
+        if files_path.exists() and clips_path.exists():
+            print(f"DEBUG: Loading separate parquet files")
+            import polars as pl
+            try:
+                files_df = pl.read_parquet(files_path)
+                clips_df = pl.read_parquet(clips_path)
+                print(f"DEBUG: Loaded files.parquet with {len(files_df)} files")
+                print(f"DEBUG: Loaded clips.parquet with {len(clips_df)} clips")
+                print(f"DEBUG: Files columns: {files_df.columns}")
+                print(f"DEBUG: Clips columns: {clips_df.columns}")
+            except Exception as e:
+                print(f"DEBUG: Error loading parquet files: {e}")
+                files_df = None
+                clips_df = None
+        
+        if db_path.exists():
+            print(f"DEBUG: Audio database file found, attempting to load...")
+            # Load minimal database info to get class structure
+            try:
+                audio_db = db.Audio_DB()
+                audio_db.load_db(str(db_path))
+                print(f"DEBUG: Successfully loaded audio database from {db_path}")
+            except Exception as db_error:
+                print(f"DEBUG: Failed to load audio database: {db_error}")
+                # For evaluation, we might not need the full database structure
+                # We can continue without it if we have the class_map from metadata
+                if not metadata or "class_map" not in metadata:
+                    raise HTTPException(status_code=500, detail=f"Failed to load audio database and no class_map in metadata: {str(db_error)}")
+                print("DEBUG: Continuing without audio database since we have class_map in metadata")
+                audio_db = None
+        else:
+            print(f"DEBUG: Audio database not found at {db_path}")
+            # For evaluation datasets, the audio database is optional if we have class_map
+            if not metadata or "class_map" not in metadata:
+                if files_df is None or clips_df is None:
+                    raise HTTPException(status_code=404, detail="No database files found and no class_map in metadata")
+            print("DEBUG: Continuing without audio database since we have class_map or parquet files")
+            audio_db = None
         
         eval_state["eval_embeddings"] = embeddings
         eval_state["eval_labels"] = labels
         eval_state["eval_dataset_path"] = str(dataset_path)
+        eval_state["eval_file_names"] = file_info  # Store file names if available
+        eval_state["eval_files_df"] = files_df  # Store files dataframe if available
+        eval_state["eval_clips_df"] = clips_df  # Store clips dataframe if available
         
         message = f"Evaluation dataset loaded with {len(embeddings)} samples and {labels.shape[1]} classes"
         if metadata:
@@ -1262,7 +1657,14 @@ async def load_evaluation_dataset(dataset_path: str):
             "metadata": metadata
         }
         
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
+        print(f"DEBUG: Unexpected error in load_evaluation_dataset: {e}")
+        print(f"DEBUG: Error type: {type(e)}")
+        import traceback
+        print(f"DEBUG: Full traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/evaluation/load-classifier")
@@ -1286,10 +1688,36 @@ async def load_evaluation_classifier(classifier_path: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def clean_nan_values(obj):
+    """Recursively clean NaN values from data structures for JSON serialization"""
+    import math
+    
+    if isinstance(obj, dict):
+        return {k: clean_nan_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nan_values(item) for item in obj]
+    elif isinstance(obj, (np.floating, float)) and math.isnan(obj):
+        return None  # Convert NaN to null in JSON
+    elif isinstance(obj, np.ndarray):
+        # Convert numpy arrays and handle NaN values
+        cleaned_array = []
+        for item in obj.flatten():
+            if isinstance(item, (np.floating, float)) and math.isnan(item):
+                cleaned_array.append(None)
+            else:
+                cleaned_array.append(float(item) if isinstance(item, np.number) else item)
+        return cleaned_array
+    elif isinstance(obj, np.number):
+        return float(obj)
+    else:
+        return obj
+
 @app.post("/api/evaluation/run-evaluation")
-async def run_evaluation():
-    """Run evaluation and calculate performance metrics"""
+async def run_evaluation(threshold: float = 0):
+    """Run evaluation and calculate performance metrics with optional threshold for class filtering"""
     try:
+        print(f"DEBUG: Running evaluation with threshold={threshold}")
+        
         if eval_state["eval_embeddings"] is None or eval_state["eval_labels"] is None:
             raise HTTPException(status_code=400, detail="Evaluation dataset not loaded")
         
@@ -1300,18 +1728,381 @@ async def run_evaluation():
         true_labels = eval_state["eval_labels"]
         classifier = eval_state["eval_classifier"]
         
-        # Get predictions
-        embeddings_array = np.array(embeddings).squeeze()
-        logits = classifier(embeddings_array)
-        predictions = tf.sigmoid(logits).numpy()
+        print(f"DEBUG: Embeddings type: {type(embeddings)}, length: {len(embeddings)}")
+        print(f"DEBUG: True labels shape: {true_labels.shape}")
+        
+        # Get predictions by processing each embedding separately
+        print(f"DEBUG: Raw embeddings structure: {[np.array(emb).shape if hasattr(emb, 'shape') or isinstance(emb, list) else type(emb) for emb in embeddings[:3]]}")
+        
+        # Process embeddings as list of arrays, handle multi-clip files
+        all_predictions = []
+        
+        for i, emb in enumerate(embeddings):
+            emb_array = np.array(emb)
+            print(f"DEBUG: Processing embedding {i}: shape {emb_array.shape}")
+            
+            if emb_array.ndim == 1:
+                # Single clip - reshape to (1, embedding_dim)
+                emb_input = emb_array.reshape(1, -1)
+                logits = classifier(emb_input)
+                clip_predictions = tf.sigmoid(logits).numpy()
+                print(f"DEBUG: Single clip logits: {logits.numpy()}")
+                print(f"DEBUG: Single clip predictions: {clip_predictions}")
+                
+            elif emb_array.ndim == 2:
+                # Multiple clips from same file - shape (n_clips, embedding_dim)
+                # Process all clips and take max prediction per class
+                logits = classifier(emb_array)  # This should work since emb_array is already (n_clips, 1280)
+                clip_predictions = tf.sigmoid(logits).numpy()
+                print(f"DEBUG: Multi-clip logits: {logits.numpy()}")
+                print(f"DEBUG: Multi-clip predictions before max: {clip_predictions}")
+                # Take max prediction across clips for each class
+                clip_predictions = np.max(clip_predictions, axis=0, keepdims=True)
+                print(f"DEBUG: Multi-clip predictions after max: {clip_predictions}")
+                
+            else:
+                raise ValueError(f"Unexpected embedding shape: {emb_array.shape}")
+            
+            all_predictions.append(clip_predictions)
+            print(f"DEBUG: Embedding {i} final prediction shape: {clip_predictions.shape}")
+            print(f"DEBUG: Embedding {i} final prediction values: {clip_predictions}")
+        
+        # Combine all predictions
+        predictions = np.vstack(all_predictions)
+        print(f"DEBUG: Final predictions shape: {predictions.shape}")
+        print(f"DEBUG: Final predictions values: {predictions}")
+        print(f"DEBUG: Final predictions range: min={np.min(predictions):.6f}, max={np.max(predictions):.6f}")
+        
+        # Store detailed predictions for display
+        detailed_predictions = []
+        
+        # Check if we need file-level evaluation
+        # For now, let's see what data we have available
+        dataset_path = eval_state.get("eval_dataset_path")
+        file_level_evaluation = False
+        metadata = None
+        
+        if dataset_path:
+            print(f"DEBUG: Looking for file grouping information in {dataset_path}")
+            # Try to load additional metadata that might contain file information
+            metadata_path = Path(dataset_path) / "metadata.json"
+            if metadata_path.exists():
+                with open(metadata_path, "r") as f:
+                    metadata = json.load(f)
+                
+                print(f"DEBUG: Metadata keys: {list(metadata.keys())}")
+                
+                # Check if metadata contains file information
+                if 'clips' in metadata:
+                    print(f"DEBUG: Found {len(metadata['clips'])} clips in metadata")
+                    # Check if clips have file information
+                    first_clip = metadata['clips'][0] if metadata['clips'] else {}
+                    print(f"DEBUG: First clip keys: {list(first_clip.keys())}")
+                    
+                    # Look for file grouping indicators
+                    if ('original_file' in first_clip or 'file_path' in first_clip or 
+                        'filename' in first_clip):
+                        # Check if we actually have multiple clips per file
+                        file_groups = {}
+                        for clip_info in metadata['clips']:
+                            file_key = (clip_info.get('original_file') or 
+                                       clip_info.get('file_path') or 
+                                       clip_info.get('filename') or
+                                       clip_info.get('file_name') or 
+                                       'unknown')
+                            
+                            # Extract just the filename from full paths
+                            if '/' in file_key or '\\' in file_key:
+                                file_key = Path(file_key).name
+                                
+                            if file_key not in file_groups:
+                                file_groups[file_key] = 0
+                            file_groups[file_key] += 1
+                        
+                        # If any file has multiple clips, enable file-level evaluation
+                        max_clips_per_file = max(file_groups.values()) if file_groups else 1
+                        if max_clips_per_file > 1:
+                            file_level_evaluation = True
+                            print(f"DEBUG: File-level evaluation enabled - max clips per file: {max_clips_per_file}")
+                        else:
+                            print(f"DEBUG: All files have single clips, using clip-level evaluation")
+                elif 'file_paths' in metadata:
+                    print(f"DEBUG: Found file_paths in metadata: {len(metadata['file_paths'])} files")
+                    print(f"DEBUG: File paths content: {metadata['file_paths']}")
+                    
+                    # Check if we have parquet files that suggest file-level evaluation
+                    clips_df = eval_state.get("eval_clips_df")
+                    files_df = eval_state.get("eval_files_df")
+                    
+                    if clips_df is not None and files_df is not None:
+                        num_clips = len(clips_df)
+                        num_files = len(files_df)
+                        print(f"DEBUG: Database shows {num_files} files with {num_clips} clips")
+                        
+                        if num_clips > num_files:
+                            file_level_evaluation = True
+                            print(f"DEBUG: File-level evaluation enabled - more clips ({num_clips}) than files ({num_files})")
+                        else:
+                            print(f"DEBUG: Clip-level evaluation - clips match files")
+                    else:
+                        print(f"DEBUG: Using file_paths for clip-level evaluation")
+                else:
+                    print(f"DEBUG: No 'clips' or 'file_paths' section found in metadata")
+            else:
+                print(f"DEBUG: No metadata file found at {metadata_path}")
+        
+        print(f"DEBUG: File-level evaluation: {file_level_evaluation}")
+        
+        # Perform file-level aggregation if needed
+        if file_level_evaluation:
+            print(f"DEBUG: Performing file-level aggregation...")
+            
+            # Group clips by original file
+            file_groups = {}
+            clip_to_file = {}
+            
+            # Try to use clips metadata first
+            if metadata and 'clips' in metadata:
+                print(f"DEBUG: Using clips metadata for file grouping")
+                for i, clip_info in enumerate(metadata['clips']):
+                    # Try multiple possible file name fields
+                    original_file = (clip_info.get('original_file') or 
+                                   clip_info.get('file_path') or 
+                                   clip_info.get('filename') or 
+                                   clip_info.get('file_name') or
+                                   f'unknown_file_{i}')
+                    
+                    # Extract just the filename from full paths
+                    if '/' in original_file or '\\' in original_file:
+                        original_file = Path(original_file).name
+                    
+                    if original_file not in file_groups:
+                        file_groups[original_file] = []
+                    file_groups[original_file].append(i)
+                    clip_to_file[i] = original_file
+            else:
+                # Use parquet files for file grouping
+                clips_df = eval_state.get("eval_clips_df")
+                files_df = eval_state.get("eval_files_df")
+                
+                if clips_df is not None and files_df is not None:
+                    print(f"DEBUG: Using parquet files for file grouping")
+                    
+                    # Get file names directly from files.parquet in order
+                    try:
+                        file_names_list = files_df["file_name"].to_list()
+                        print(f"DEBUG: File names from files.parquet: {file_names_list}")
+                        
+                        # Create file groups - each embedding corresponds to one file
+                        for i, file_name in enumerate(file_names_list):
+                            if i >= len(predictions):
+                                break
+                                
+                            # Extract just filename from path if needed
+                            if file_name and ('/' in str(file_name) or '\\' in str(file_name)):
+                                clean_file_name = Path(str(file_name)).name
+                            else:
+                                clean_file_name = str(file_name) if file_name else f"file_{i}"
+                            
+                            # Each file corresponds to one prediction in file-level evaluation
+                            file_groups[clean_file_name] = [i]
+                            clip_to_file[i] = clean_file_name
+                            
+                            print(f"DEBUG: File {i}: {clean_file_name} -> prediction index {i}")
+                        
+                        print(f"DEBUG: Final file groups: {file_groups}")
+                        
+                    except Exception as e:
+                        print(f"DEBUG: Error grouping with parquet files: {e}")
+                        # Fallback: create one group per prediction
+                        for i in range(len(predictions)):
+                            file_name = f"file_{i}"
+                            file_groups[file_name] = [i]
+                            clip_to_file[i] = file_name
+                else:
+                    print(f"DEBUG: No grouping information available, treating each sample as separate file")
+                    for i in range(len(predictions)):
+                        file_name = f"file_{i}"
+                        file_groups[file_name] = [i]
+                        clip_to_file[i] = file_name
+            
+            print(f"DEBUG: Found {len(file_groups)} unique files:")
+            for file_name, clip_indices in file_groups.items():
+                print(f"DEBUG: - {file_name}: {len(clip_indices)} clips (indices: {clip_indices})")
+            
+            # Aggregate predictions and labels at file level
+            file_names = list(file_groups.keys())
+            num_files = len(file_names)
+            
+            # Create file-level predictions (max across clips for each class)
+            file_predictions = np.zeros((num_files, predictions.shape[1]))
+            file_labels = np.zeros((num_files, true_labels.shape[1]))
+            
+            for file_idx, (file_name, clip_indices) in enumerate(file_groups.items()):
+                # Get max prediction across all clips of this file for each class
+                file_clip_predictions = predictions[clip_indices]
+                file_predictions[file_idx] = np.max(file_clip_predictions, axis=0)
+                
+                # For labels, take the max (if any clip is positive, file is positive)
+                file_clip_labels = true_labels[clip_indices]
+                file_labels[file_idx] = np.max(file_clip_labels, axis=0)
+                
+                # Store detailed prediction info for display
+                detailed_predictions.append({
+                    "file_name": file_name,
+                    "predictions": file_predictions[file_idx].tolist(),
+                    "labels": file_labels[file_idx].tolist(),
+                    "num_clips": len(clip_indices)
+                })
+                
+                print(f"DEBUG: File '{file_name}': max predictions {file_predictions[file_idx]}, labels {file_labels[file_idx]}")
+            
+            # Use file-level data for evaluation
+            predictions = file_predictions
+            true_labels = file_labels
+            
+            print(f"DEBUG: Aggregated to {num_files} files for evaluation")
+            print(f"DEBUG: New predictions shape: {predictions.shape}")
+            print(f"DEBUG: New true labels shape: {true_labels.shape}")
+        else:
+            # Clip-level evaluation - create detailed predictions from metadata if available
+            if metadata:
+                if 'clips' in metadata:
+                    print(f"DEBUG: Using metadata clips for clip-level evaluation")
+                    print(f"DEBUG: Found {len(metadata['clips'])} clips in metadata, {len(predictions)} predictions")
+                    
+                    if len(metadata['clips']) == len(predictions):
+                        for i, clip_info in enumerate(metadata['clips']):
+                            # Try different possible file name fields
+                            clip_name = (clip_info.get('filename') or 
+                                       clip_info.get('original_file') or 
+                                       clip_info.get('file_path') or 
+                                       clip_info.get('file_name') or
+                                       f'clip_{i}')
+                            
+                            # If we have a path, extract just the filename
+                            if '/' in clip_name or '\\' in clip_name:
+                                clip_name = Path(clip_name).name
+                            
+                            print(f"DEBUG: Clip {i}: using name '{clip_name}' from {list(clip_info.keys())}")
+                            detailed_predictions.append({
+                                "file_name": clip_name,
+                                "predictions": predictions[i].tolist(),
+                                "labels": true_labels[i].tolist(),
+                                "num_clips": 1
+                            })
+                    else:
+                        print(f"DEBUG: Metadata clips count mismatch: {len(metadata['clips'])} != {len(predictions)}")
+                elif 'file_paths' in metadata:
+                    print(f"DEBUG: Using file_paths from metadata for clip-level evaluation")
+                    print(f"DEBUG: Found {len(metadata['file_paths'])} file paths, {len(predictions)} predictions")
+                    
+                    if len(metadata['file_paths']) == len(predictions):
+                        for i, file_path in enumerate(metadata['file_paths']):
+                            # Extract just the filename from the path
+                            filename = Path(file_path).name
+                            print(f"DEBUG: Sample {i}: using filename '{filename}' from path '{file_path}'")
+                            detailed_predictions.append({
+                                "file_name": filename,
+                                "predictions": predictions[i].tolist(),
+                                "labels": true_labels[i].tolist(),
+                                "num_clips": 1
+                            })
+                    else:
+                        print(f"DEBUG: File paths count mismatch: {len(metadata['file_paths'])} != {len(predictions)}")
+                else:
+                    print(f"DEBUG: No clips or file_paths found in metadata")
+            
+            # Try using file names from clips dataframe as fallback
+            if not detailed_predictions:
+                clips_df = eval_state.get("eval_clips_df")
+                files_df = eval_state.get("eval_files_df")
+                
+                if clips_df is not None and files_df is not None and len(clips_df) == len(predictions):
+                    print(f"DEBUG: Using clips and files dataframes for file names")
+                    print(f"DEBUG: Clips dataframe has {len(clips_df)} rows, predictions has {len(predictions)} samples")
+                    
+                    # Join clips with files to get file names
+                    try:
+                        clips_with_files = clips_df.join(files_df, on="file_id", how="left")
+                        print(f"DEBUG: Joined dataframe columns: {clips_with_files.columns}")
+                        
+                        # Extract file names (try different possible column names)
+                        filename_column = None
+                        for col in ["file_name", "filename", "name", "path", "file_path"]:
+                            if col in clips_with_files.columns:
+                                filename_column = col
+                                break
+                        
+                        if filename_column:
+                            print(f"DEBUG: Using column '{filename_column}' for file names")
+                            file_names = clips_with_files[filename_column].to_list()
+                            
+                            for i, filename in enumerate(file_names):
+                                # Extract just filename from path if needed
+                                if filename and ('/' in str(filename) or '\\' in str(filename)):
+                                    filename = Path(str(filename)).name
+                                elif not filename:
+                                    filename = f"unknown_file_{i}"
+                                    
+                                detailed_predictions.append({
+                                    "file_name": str(filename),
+                                    "predictions": predictions[i].tolist(),
+                                    "labels": true_labels[i].tolist(),
+                                    "num_clips": 1
+                                })
+                                print(f"DEBUG: Added detailed prediction {i}: {str(filename)} -> {predictions[i].tolist()}")
+                        else:
+                            print(f"DEBUG: No suitable filename column found in joined dataframe")
+                            
+                    except Exception as e:
+                        print(f"DEBUG: Error joining dataframes: {e}")
+                        
+                # Try using file names from embeddings data as another fallback
+                if not detailed_predictions:
+                    file_names_from_embeddings = eval_state.get("eval_file_names")
+                    if file_names_from_embeddings and len(file_names_from_embeddings) == len(predictions):
+                        print(f"DEBUG: Using file names from embeddings data")
+                        for i, filename in enumerate(file_names_from_embeddings):
+                            # Extract just filename from path if needed
+                            if '/' in filename or '\\' in filename:
+                                filename = Path(filename).name
+                            detailed_predictions.append({
+                                "file_name": filename,
+                                "predictions": predictions[i].tolist(),
+                                "labels": true_labels[i].tolist(),
+                                "num_clips": 1
+                            })
+                    else:
+                        print(f"DEBUG: Using fallback naming for {len(predictions)} predictions")
+                        if file_names_from_embeddings:
+                            print(f"DEBUG: File names count mismatch: {len(file_names_from_embeddings)} != {len(predictions)}")
+                        for i in range(len(predictions)):
+                            detailed_predictions.append({
+                                "file_name": f"sample_{i}",
+                                "predictions": predictions[i].tolist(),
+                                "labels": true_labels[i].tolist(),
+                                "num_clips": 1
+                            })
         
         # Determine if single class or multiclass
         num_classes = true_labels.shape[1]
+        num_prediction_classes = predictions.shape[1]
         is_single_class = num_classes == 1
+        
+        print(f"DEBUG: Dataset has {num_classes} classes, model predicts {num_prediction_classes} classes")
+        
+        # Check for class count mismatch
+        if num_classes != num_prediction_classes:
+            error_msg = f"Class count mismatch: Dataset has {num_classes} classes but model predicts {num_prediction_classes} classes"
+            print(f"DEBUG: {error_msg}")
+            raise HTTPException(status_code=400, detail=error_msg)
         
         results = {
             "is_single_class": is_single_class,
-            "num_classes": num_classes
+            "num_classes": num_classes,
+            "evaluation_level": "file" if file_level_evaluation else "clip",
+            "num_samples": len(predictions)
         }
         
         if is_single_class:
@@ -1320,12 +2111,12 @@ async def run_evaluation():
             predictions_1d = predictions[:, 0]
             
             # Calculate AUC
-            auc_result = tc.get_AUC(true_labels, predictions)
-            results["auc"] = auc_result["individual"][0]
+            auc_result = tc.get_AUC(true_labels, predictions, threshold)
+            results["auc"] = auc_result["individual"][0] if len(auc_result["individual"]) > 0 else None
             
             # Calculate Average Precision
-            ap_result = tc.cmap(true_labels, predictions, 0)
-            results["average_precision"] = ap_result["individual"][0]
+            ap_result = tc.cmap(true_labels, predictions, threshold)
+            results["average_precision"] = ap_result["individual"][0] if len(ap_result["individual"]) > 0 else None
             
             # Calculate confusion matrix (binary)
             predicted_binary = (predictions_1d > 0.5).astype(int)
@@ -1335,14 +2126,16 @@ async def run_evaluation():
         else:
             # Multiclass evaluation
             # Calculate macro AUC
-            auc_result = tc.get_AUC(true_labels, predictions)
+            auc_result = tc.get_AUC(true_labels, predictions, threshold)
             results["macro_auc"] = auc_result["macro"]
             results["class_aucs"] = auc_result["individual"]
+            results["auc_mask"] = auc_result["mask"].tolist() if "mask" in auc_result else None
             
             # Calculate mean Average Precision
-            ap_result = tc.cmap(true_labels, predictions, 0)
+            ap_result = tc.cmap(true_labels, predictions, threshold)
             results["mean_ap"] = ap_result["macro"]
             results["class_aps"] = ap_result["individual"]
+            results["ap_mask"] = ap_result["mask"].tolist() if "mask" in ap_result else None
             
             # Generate class names from metadata if available
             if eval_state["eval_class_map"]:
@@ -1353,17 +2146,170 @@ async def run_evaluation():
                 results["class_names"] = [f"Class_{i}" for i in range(num_classes)]
             
             # Calculate multiclass confusion matrix
-            # Convert to predicted class labels (argmax for multiclass)
-            predicted_classes = np.argmax(predictions, axis=1)
-            true_classes = np.argmax(true_labels, axis=1)
+            print(f"DEBUG CM: predictions shape: {predictions.shape}")
+            print(f"DEBUG CM: true_labels shape: {true_labels.shape}")
+            print(f"DEBUG CM: predictions sample: {predictions[:2]}")
+            print(f"DEBUG CM: true_labels sample: {true_labels[:2]}")
             
-            cm = confusion_matrix(true_classes, predicted_classes, labels=range(num_classes))
-            results["confusion_matrix"] = cm.tolist()
+            # Check if this is multi-label (binary) or multi-class (mutually exclusive)
+            # Multi-label: each sample can have multiple classes (0s and 1s)
+            # Multi-class: each sample has exactly one class (one-hot or single index)
+            
+            is_multilabel = np.any((true_labels > 0) & (true_labels < 1)) == False and np.any(np.sum(true_labels, axis=1) > 1)
+            print(f"DEBUG CM: is_multilabel: {is_multilabel}")
+            
+            if is_multilabel:
+                # For multi-label, create separate binary confusion matrices for each class
+                # This is more appropriate than a single multiclass matrix
+                print(f"DEBUG CM: Creating multi-label confusion matrices")
+                cms = []
+                for class_idx in range(num_classes):
+                    # Binary predictions for this class (threshold at 0.5)
+                    pred_binary = (predictions[:, class_idx] > 0.5).astype(int)
+                    true_binary = true_labels[:, class_idx].astype(int)
+                    cm_binary = confusion_matrix(true_binary, pred_binary, labels=[0, 1])
+                    cms.append(cm_binary.tolist())
+                results["confusion_matrix"] = cms
+                results["confusion_matrix_type"] = "multilabel"
+            else:
+                # For true multi-class, use argmax approach
+                print(f"DEBUG CM: Creating multi-class confusion matrix")
+                predicted_classes = np.argmax(predictions, axis=1)
+                true_classes = np.argmax(true_labels, axis=1)
+                cm = confusion_matrix(true_classes, predicted_classes, labels=range(num_classes))
+                results["confusion_matrix"] = cm.tolist()
+                results["confusion_matrix_type"] = "multiclass"
+        
+        # Add detailed predictions to results
+        results["detailed_predictions"] = detailed_predictions
+        
+        # Clean NaN values before returning
+        cleaned_results = clean_nan_values(results)
+        
+        return {
+            "status": "success", 
+            "message": "Evaluation completed successfully",
+            "results": cleaned_results
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/evaluation/export-metrics-csv")
+async def export_metrics_csv(export_path: str, filename: str):
+    """Export evaluation metrics as CSV with metrics summary"""
+    try:
+        # Check if we have evaluation results
+        if (eval_state["eval_embeddings"] is None or eval_state["eval_labels"] is None or 
+            eval_state["eval_classifier"] is None):
+            raise HTTPException(status_code=400, detail="No evaluation results available")
+        
+        # Get the current evaluation results by calling run_evaluation with default threshold
+        # This ensures we have the latest results
+        response = await run_evaluation(threshold=0)
+        results = response["results"]
+        
+        import csv
+        import os
+        
+        # Ensure export path exists
+        export_path = Path(export_path)
+        export_path.mkdir(parents=True, exist_ok=True)
+        
+        # Create full file path
+        csv_filename = f"{filename}.csv"
+        full_path = export_path / csv_filename
+        
+        # Write CSV file
+        with open(full_path, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            
+            # Write header
+            header = ['Metric', 'Macro']
+            if 'class_names' in results:
+                header.extend(results['class_names'])
+            else:
+                # Fallback class names
+                num_classes = len(results.get('class_aucs', []))
+                header.extend([f'Class_{i}' for i in range(num_classes)])
+            writer.writerow(header)
+            
+            # Write AUC row
+            if results['is_single_class']:
+                auc_row = ['AUC', results.get('auc', 'N/A'), results.get('auc', 'N/A')]
+            else:
+                auc_row = ['AUC', results.get('macro_auc', 'N/A')]
+                auc_row.extend([str(auc) if auc is not None else 'N/A' for auc in results.get('class_aucs', [])])
+            writer.writerow(auc_row)
+            
+            # Write AP row
+            if results['is_single_class']:
+                ap_row = ['AP', results.get('average_precision', 'N/A'), results.get('average_precision', 'N/A')]
+            else:
+                ap_row = ['AP', results.get('mean_ap', 'N/A')]
+                ap_row.extend([str(ap) if ap is not None else 'N/A' for ap in results.get('class_aps', [])])
+            writer.writerow(ap_row)
         
         return {
             "status": "success",
-            "message": "Evaluation completed successfully",
-            "results": results
+            "message": f"Metrics CSV exported successfully to {full_path}",
+            "file_path": str(full_path)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/evaluation/export-predictions-csv")
+async def export_predictions_csv(export_path: str, filename: str):
+    """Export detailed predictions as CSV with file/clip names and class scores"""
+    try:
+        # Check if we have evaluation results
+        if (eval_state["eval_embeddings"] is None or eval_state["eval_labels"] is None or 
+            eval_state["eval_classifier"] is None):
+            raise HTTPException(status_code=400, detail="No evaluation results available")
+        
+        # Get the current evaluation results
+        response = await run_evaluation(threshold=0)
+        results = response["results"]
+        
+        import csv
+        import os
+        
+        # Ensure export path exists
+        export_path = Path(export_path)
+        export_path.mkdir(parents=True, exist_ok=True)
+        
+        # Create full file path
+        csv_filename = f"{filename}.csv"
+        full_path = export_path / csv_filename
+        
+        # Write CSV file
+        with open(full_path, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            
+            # Write header
+            sample_type = "File" if results.get('evaluation_level') == 'file' else "Clip"
+            header = [f'{sample_type}_Name']
+            if 'class_names' in results:
+                header.extend(results['class_names'])
+            else:
+                # Fallback class names
+                if 'detailed_predictions' in results and len(results['detailed_predictions']) > 0:
+                    num_classes = len(results['detailed_predictions'][0]['predictions'])
+                    header.extend([f'Class_{i}' for i in range(num_classes)])
+            writer.writerow(header)
+            
+            # Write prediction rows
+            if 'detailed_predictions' in results:
+                for item in results['detailed_predictions']:
+                    row = [item['file_name']]
+                    row.extend([f"{pred:.6f}" for pred in item['predictions']])
+                    writer.writerow(row)
+        
+        return {
+            "status": "success",
+            "message": f"Predictions CSV exported successfully to {full_path}",
+            "file_path": str(full_path)
         }
         
     except Exception as e:
@@ -1548,7 +2494,7 @@ def training_thread(config: ModelTrainingConfig):
             config.training_params.verbose,
             label_strength=strength_train,
             eval_label_strength=strength_test,
-            weak_neg_weight=0.05
+            weak_neg_weight=config.training_params.weak_neg_weight
         )
         
         # Add final metrics to logs
@@ -1659,6 +2605,128 @@ async def stop_model_training():
         return {"status": "success", "message": "Stop signal sent to training process"}
     else:
         return {"status": "error", "message": "No training in progress"}
+
+@app.post("/api/model-training/preview-data")
+async def preview_training_data(training_audio_folder: str, metadata_path: str):
+    """Preview training data - files, labels, and label strengths"""
+    try:
+        # Load metadata
+        metadata_path = Path(metadata_path)
+        if not metadata_path.exists():
+            raise HTTPException(status_code=400, detail="Metadata file not found")
+            
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+        
+        class_map = metadata.get("class_map", {})
+        backend_model = metadata.get("dataset_info", {}).get("backend_model", "PERCH")
+        
+        # Find training audio files
+        audio_folder = Path(training_audio_folder)
+        if not audio_folder.exists():
+            raise HTTPException(status_code=400, detail="Training audio folder not found")
+        
+        files = list(audio_folder.glob("**/*.wav"))
+        files.extend(list(audio_folder.glob("**/*.mp3")))
+        files.extend(list(audio_folder.glob("**/*.WAV")))
+        files.extend(list(audio_folder.glob("**/*.MP3")))
+        files = [str(f) for f in files]
+        
+        if not files:
+            raise HTTPException(status_code=400, detail="No audio files found in training folder")
+        
+        # Check if this is an exported dataset with enhanced metadata
+        preview_data = []
+        use_label_strength = False
+        
+        try:
+            print(f"DEBUG: Attempting enhanced loading for {len(files)} files")
+            file_paths, labels, label_strengths, export_metadata = u.load_training_data_with_strength(
+                str(audio_folder), class_map
+            )
+            use_label_strength = True
+            print(f"DEBUG: Enhanced loading successful - got {len(file_paths)} files, {len(labels)} labels, {len(label_strengths)} strengths")
+            
+            # Create preview data with enhanced metadata
+            for i, file_path in enumerate(file_paths):
+                file_name = os.path.basename(file_path)
+                label_vector = labels[i] if len(labels) > i else None
+                strength_vector = label_strengths[i] if len(label_strengths) > i else None
+                
+                print(f"DEBUG: File {i}: {file_name}")
+                print(f"DEBUG: Label vector: {label_vector}")
+                print(f"DEBUG: Strength vector: {strength_vector}")
+                
+                # Convert numpy arrays to lists and create readable class labels
+                class_labels = {}
+                class_strengths = {}
+                
+                if label_vector is not None and strength_vector is not None:
+                    for class_name, class_idx in class_map.items():
+                        if class_idx < len(label_vector):
+                            label_value = int(label_vector[class_idx])
+                            strength_value = float(strength_vector[class_idx])
+                            
+                            class_labels[class_name] = "Present" if label_value == 1 else "Not Present"
+                            class_strengths[class_name] = "Strong" if strength_value >= 0.8 else "Weak"
+                
+                preview_data.append({
+                    "file_path": file_path,
+                    "file_name": file_name,
+                    "class_labels": class_labels,
+                    "class_strengths": class_strengths,
+                    "raw_label_vector": label_vector.tolist() if label_vector is not None else None,
+                    "raw_strength_vector": strength_vector.tolist() if strength_vector is not None else None
+                })
+                
+        except (ValueError, KeyError) as e:
+            # Fallback to legacy loading if enhanced loading fails
+            print(f"DEBUG: Enhanced loading failed: {e}")
+            print("DEBUG: Falling back to legacy label extraction from filenames")
+            use_label_strength = False
+            
+            # Extract labels from filenames (legacy method)  
+            for file_path in files:
+                file_name = os.path.basename(file_path)
+                file_label = u.get_label(class_map, file_path)
+                
+                print(f"DEBUG: Legacy - File: {file_name}")
+                print(f"DEBUG: Legacy - Label from get_label: {file_label}")
+                print(f"DEBUG: Legacy - Class map: {class_map}")
+                
+                # Convert label vector to readable class labels
+                class_labels = {}
+                class_strengths = {}
+                
+                if file_label is not None:
+                    for class_name, class_idx in class_map.items():
+                        if class_idx < len(file_label):
+                            label_value = int(file_label[class_idx])
+                            class_labels[class_name] = "Present" if label_value == 1 else "Not Present" 
+                            class_strengths[class_name] = "Strong"  # Legacy assumes all strong
+                
+                preview_data.append({
+                    "file_path": file_path,
+                    "file_name": file_name,
+                    "class_labels": class_labels,
+                    "class_strengths": class_strengths,
+                    "raw_label_vector": file_label.tolist() if file_label is not None else None,
+                    "raw_strength_vector": None  # Not available in legacy mode
+                })
+        
+        return {
+            "status": "success",
+            "data": {
+                "total_files": len(preview_data),
+                "class_map": class_map,
+                "backend_model": backend_model,
+                "use_label_strength": use_label_strength,
+                "files": preview_data[:100]  # Limit to first 100 for performance
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

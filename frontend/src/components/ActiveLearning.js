@@ -22,6 +22,7 @@ const ActiveLearning = ({ isActive = true }) => {
   const [labelStatistics, setLabelStatistics] = useState(null);
   const [clipLabels, setClipLabels] = useState(null);
   const [reviewMode, setReviewMode] = useState('random');
+  const [additionalPositiveClasses, setAdditionalPositiveClasses] = useState([]);
   const audioRef = useRef(null);
 
   const colorModeOptions = [
@@ -34,6 +35,7 @@ const ActiveLearning = ({ isActive = true }) => {
   const reviewModeOptions = [
     { value: 'random', label: 'Random' },
     { value: 'top_down', label: 'Top-down (Highest Score First)' },
+    { value: 'top_10+score_quantiles', label: 'Top 10+Score Quantiles (50 clips/round)' },
   ];
 
   const loadAvailableClasses = async () => {
@@ -44,18 +46,54 @@ const ActiveLearning = ({ isActive = true }) => {
         label: cls.name
       }));
       setAvailableClasses(classes);
-      
+
       // Set default selected class
       if (classes.length > 0) {
         const defaultClass = classes[0];
         setSelectedClass(defaultClass);
         setCurrentClassIndex(defaultClass.value);
       }
-      
+
       return classes;
     } catch (error) {
       console.error('Failed to load classes:', error);
       return [];
+    }
+  };
+
+  const annotateAdditionalClasses = async () => {
+    if (!currentClip || additionalPositiveClasses.length === 0) {
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+
+      // Annotate each selected additional class as "present"
+      for (const classOption of additionalPositiveClasses) {
+        const request = {
+          clip_id: currentClip.clip_id,
+          annotation: 1, // Present
+          class_index: classOption.value
+        };
+
+        await axios.post('/api/active-learning/annotate-class', request);
+      }
+
+      const classNames = additionalPositiveClasses.map(c => c.label).join(', ');
+      toast.success(`Marked additional classes as present: ${classNames}`);
+
+      // Clear the selection
+      setAdditionalPositiveClasses([]);
+
+      // Update label statistics and clip labels after annotation
+      await loadLabelStatistics();
+      await loadClipLabels(currentClip.clip_id);
+    } catch (error) {
+      const message = error.response?.data?.detail || 'Failed to annotate additional classes';
+      toast.error(message);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -112,7 +150,7 @@ const ActiveLearning = ({ isActive = true }) => {
   };
 
   const loadClipLabels = async (clipId) => {
-    if (!clipId || availableClasses.length <= 1) return;
+    if (!clipId) return;
     
     try {
       const response = await axios.get('/api/active-learning/clip-labels', {
@@ -123,7 +161,7 @@ const ActiveLearning = ({ isActive = true }) => {
       }
     } catch (error) {
       console.error('Failed to load clip labels:', error);
-      setClipLabels(null);
+      setClipLabels([]);
     }
   };
 
@@ -369,15 +407,13 @@ const ActiveLearning = ({ isActive = true }) => {
 
   const exportClips = async () => {
     const exportPath = prompt('Enter export path:');
-    const annotationSlug = prompt('Enter annotation slug:');
     
-    if (!exportPath || !annotationSlug) return;
+    if (!exportPath) return;
 
     try {
       const response = await axios.post('/api/active-learning/export-clips', null, {
         params: { 
-          export_path: exportPath,
-          annotation_slug: annotationSlug 
+          export_path: exportPath
         }
       });
       
@@ -501,7 +537,7 @@ const ActiveLearning = ({ isActive = true }) => {
               }}
             />
             <small style={{ color: '#666', fontSize: '0.875rem' }}>
-              Select how clips should be presented for annotation. Top-down mode shows unreviewed clips with highest scores first.
+              Select how clips should be presented for annotation. Top-down shows highest scores first. Top 10+Score Quantiles presents 50 clips per round: top 10 highest scoring + 10 clips from each of 4 score ranges (0-0.5, 0.5-0.75, 0.75-0.875, 0.875-1.0).
             </small>
           </div>
         )}
@@ -524,7 +560,6 @@ const ActiveLearning = ({ isActive = true }) => {
                       <ul style={{ margin: '0.25rem 0', paddingLeft: '20px' }}>
                         <li>Total clips: {labelStatistics.total_clips}</li>
                         <li>Strong labels: {labelStatistics.clips_with_strong_labels}</li>
-                        <li>Weak labels only: {labelStatistics.clips_with_only_weak_labels}</li>
                       </ul>
                     </div>
                     {availableClasses.length > 1 && (
@@ -638,8 +673,8 @@ const ActiveLearning = ({ isActive = true }) => {
               <div>
                 <p style={{ margin: 0 }}>
                   <strong>File:</strong> {currentClip.file_name} | 
-                  <strong> Time:</strong> {currentClip.clip_start.toFixed(1)}s - {currentClip.clip_end.toFixed(1)}s | 
-                  <strong> Score:</strong> {currentClip.score.toFixed(3)} |
+                  <strong> Time:</strong> {typeof currentClip.clip_start === 'number' ? currentClip.clip_start.toFixed(1) : currentClip.clip_start}s - {typeof currentClip.clip_end === 'number' ? currentClip.clip_end.toFixed(1) : currentClip.clip_end}s | 
+                  <strong> Score:</strong> {typeof currentClip.score === 'number' ? currentClip.score.toFixed(3) : currentClip.score} |
                   <strong> Clip:</strong> {currentClipIndex + 1} of {clips.length}
                 </p>
               </div>
@@ -662,41 +697,96 @@ const ActiveLearning = ({ isActive = true }) => {
             </div>
             
             {/* Clip Labels Information */}
-            {clipLabels && availableClasses.length > 1 && (
-              <div style={{ 
-                marginTop: '1rem', 
-                padding: '0.75rem', 
-                backgroundColor: '#f8f9fa', 
-                borderRadius: '6px',
-                border: '1px solid #ddd'
-              }}>
-                <h5 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#6e7cb9' }}>
-                  Class Labels for This Clip:
-                </h5>
-                <div style={{ 
-                  display: 'grid', 
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', 
-                  gap: '0.5rem',
-                  fontSize: '0.8rem'
-                }}>
-                  {clipLabels.map((classLabel, index) => (
-                    <div 
-                      key={index}
-                      style={{ 
-                        padding: '0.25rem 0.5rem',
-                        backgroundColor: classLabel.is_current ? '#d0eaf1' : 'white',
-                        border: classLabel.is_current ? '1px solid #7bbcd5' : '1px solid #e9ecef',
+            <div style={{ 
+              marginTop: '1rem', 
+              padding: '0.75rem', 
+              backgroundColor: '#f8f9fa', 
+              borderRadius: '6px',
+              border: '1px solid #ddd'
+            }}>
+              <h5 style={{ margin: '0 0 0.75rem 0', fontSize: '0.9rem', color: '#6e7cb9' }}>
+                Current Labels for This Clip:
+              </h5>
+              
+              
+              {clipLabels && clipLabels.length > 0 ? (
+                <>
+                  {/* Target Class Section */}
+                  {selectedClass && (
+                    <div style={{ marginBottom: '0.75rem' }}>
+                      <div style={{ 
+                        padding: '0.5rem', 
+                        backgroundColor: '#d0eaf1', 
+                        border: '1px solid #7bbcd5', 
                         borderRadius: '4px',
-                        fontSize: '0.75rem'
-                      }}
-                    >
-                      <strong>{classLabel.class_name}:</strong> {classLabel.label_text}
-                      {classLabel.is_current && ' (current)'}
+                        marginBottom: '0.5rem'
+                      }}>
+                        <strong style={{ color: '#2c5282' }}>Target Class: {selectedClass.label}</strong>
+                        <div style={{ marginTop: '0.25rem', fontSize: '0.8rem' }}>
+                          {(() => {
+                            const targetClassLabel = clipLabels.find(cl => cl.is_current);
+                            if (!targetClassLabel) {
+                              return <span style={{ color: '#666' }}>🔘 Unlabelled</span>;
+                            }
+                            
+                            switch(targetClassLabel.label_text) {
+                              case 'Present':
+                                return <span style={{ color: '#059669' }}>✅ Present</span>;
+                              case 'Not Present':
+                                return <span style={{ color: '#dc2626' }}>❌ Not Present</span>;
+                              case 'Uncertain':
+                                return <span style={{ color: '#d97706' }}>❓ Uncertain</span>;
+                              default:
+                                return <span style={{ color: '#666' }}>🔘 Unlabelled</span>;
+                            }
+                          })()}
+                        </div>
+                      </div>
                     </div>
-                  ))}
+                  )}
+                  
+                  {/* Other Classes Section */}
+                  {availableClasses.length > 1 && (
+                    <div>
+                      <strong style={{ fontSize: '0.85rem', color: '#4a5568' }}>Other Classes:</strong>
+                      <div style={{ 
+                        marginTop: '0.25rem',
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: '0.5rem'
+                      }}>
+                        {clipLabels
+                          .filter(cl => !cl.is_current && cl.label_text === 'Present')
+                          .map((classLabel, index) => (
+                            <div 
+                              key={index}
+                              style={{ 
+                                padding: '0.25rem 0.5rem',
+                                backgroundColor: '#d1fae5',
+                                border: '1px solid #10b981',
+                                borderRadius: '12px',
+                                fontSize: '0.75rem',
+                                color: '#059669'
+                              }}
+                            >
+                              <strong>{classLabel.class_name}</strong>: Present
+                            </div>
+                          ))}
+                        {clipLabels.filter(cl => !cl.is_current && cl.label_text === 'Present').length === 0 && (
+                          <span style={{ fontSize: '0.75rem', color: '#666', fontStyle: 'italic' }}>
+                            No other classes labeled as present
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div style={{ fontSize: '0.8rem', color: '#666' }}>
+                  {!clipLabels ? 'Loading clip labels...' : 'No labels found for this clip'}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
 
           <div>
@@ -754,7 +844,7 @@ const ActiveLearning = ({ isActive = true }) => {
                         fontSize: '0.875rem',
                         border: '2px solid #e89c81',
                         '&:hover': { border: '2px solid #e89c81' },
-                        '&:focus-within': { 
+                        '&:focus-within': {
                           border: '2px solid #6e7cb9',
                           boxShadow: '0 0 0 3px rgba(110, 124, 185, 0.1)'
                         }
@@ -771,6 +861,72 @@ const ActiveLearning = ({ isActive = true }) => {
                   />
                   <small style={{ color: '#666', fontSize: '0.75rem', display: 'block', marginTop: '3px' }}>
                     Select which class to annotate
+                  </small>
+                </div>
+              )}
+
+              {/* Additional Positive Classes Multi-Select */}
+              {isDatasetLoaded && availableClasses.length > 1 && (
+                <div className="form-group" style={{ marginTop: '15px' }}>
+                  <label htmlFor="additionalClasses" style={{ fontSize: '0.9rem', marginBottom: '5px', display: 'block' }}>Mark Additional Classes as Positive</label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <Select
+                      id="additionalClasses"
+                      isMulti
+                      options={availableClasses.filter(cls => cls.value !== currentClassIndex)}
+                      value={additionalPositiveClasses}
+                      onChange={setAdditionalPositiveClasses}
+                      placeholder="Select additional classes to mark as present..."
+                      isSearchable={true}
+                      isDisabled={isLoading}
+                      styles={{
+                        control: (base) => ({
+                          ...base,
+                          fontSize: '0.875rem',
+                          border: '2px solid #e89c81',
+                          '&:hover': { border: '2px solid #e89c81' },
+                          '&:focus-within': {
+                            border: '2px solid #6e7cb9',
+                            boxShadow: '0 0 0 3px rgba(110, 124, 185, 0.1)'
+                          }
+                        }),
+                        multiValue: (base) => ({
+                          ...base,
+                          backgroundColor: '#d0eaf1',
+                          border: '1px solid #7bbcd5'
+                        }),
+                        multiValueLabel: (base) => ({
+                          ...base,
+                          color: '#2c5282',
+                          fontSize: '0.8rem'
+                        }),
+                        multiValueRemove: (base) => ({
+                          ...base,
+                          color: '#2c5282',
+                          '&:hover': {
+                            backgroundColor: '#7bbcd5',
+                            color: 'white'
+                          }
+                        })
+                      }}
+                    />
+                    {additionalPositiveClasses.length > 0 && (
+                      <button
+                        onClick={annotateAdditionalClasses}
+                        disabled={isLoading}
+                        className="btn btn-success"
+                        style={{
+                          fontSize: '0.85rem',
+                          padding: '8px 16px',
+                          alignSelf: 'flex-start'
+                        }}
+                      >
+                        Mark {additionalPositiveClasses.length} Class{additionalPositiveClasses.length === 1 ? '' : 'es'} as Present
+                      </button>
+                    )}
+                  </div>
+                  <small style={{ color: '#666', fontSize: '0.75rem', display: 'block', marginTop: '3px' }}>
+                    Select existing classes to mark as present for this clip (in addition to your target class)
                   </small>
                 </div>
               )}
