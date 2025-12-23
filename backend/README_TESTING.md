@@ -41,6 +41,9 @@ The testing framework uses **only existing dependencies** from `environment.yml`
 # Activate the environment
 conda activate bioacoustics-web-app
 
+# Install httpx for FastAPI testing (required for API endpoint tests)
+pip install httpx
+
 # Navigate to backend directory
 cd backend
 

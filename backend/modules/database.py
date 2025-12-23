@@ -366,6 +366,21 @@ class Audio_DB:
           # Check if all classes have weak labels (sum == 0 means all classes are weak)
           return self.df['label_strength'].list.eval(pl.element().sum() == 0)
   
+  def get_class_names(self) -> List[str]:
+      """Get the list of class names."""
+      if hasattr(self, 'class_map') and self.class_map:
+          # Sort by value to ensure consistent ordering
+          return [k for k, v in sorted(self.class_map.items(), key=lambda item: item[1])]
+      
+      # Fallback: Get from annotations table
+      if len(self.annotations_df) > 0:
+          existing_classes = sorted(self.annotations_df["class_name"].unique().to_list())
+          if len(existing_classes) >= self.num_classes:
+              return existing_classes[:self.num_classes]
+              
+      # Fallback: Default names
+      return [f"class_{i}" for i in range(self.num_classes)]
+
   def get_label_statistics(self):
       """
       Get statistics about annotations across all classes using the new annotations table.
@@ -408,19 +423,32 @@ class Audio_DB:
               if label in class_stats[class_name]:
                   class_stats[class_name][label] = count
       
-      # Convert to the format expected by the frontend
-      # "Strong labels" = present + not_present annotations (definitive annotations)
-      # "Weak labels" = uncertain annotations or no annotations
-      definitive_annotations = annotation_counts.get("present", 0) + annotation_counts.get("not_present", 0)
-      uncertain_annotations = annotation_counts.get("uncertain", 0)
+      # Count unique clips with at least one definitive label (present or not_present)
+      if len(self.annotations_df) > 0:
+          strong_clips_df = self.annotations_df.filter(
+              pl.col("label").is_in(["present", "not_present"])
+          ).select("clip_id").unique()
+          strong_clips = strong_clips_df.height
+          
+          # Count clips with only weak labels (uncertain) and NO definitive labels
+          uncertain_clips_df = self.annotations_df.filter(
+              pl.col("label") == "uncertain"
+          ).select("clip_id").unique()
+          
+          only_weak_clips = uncertain_clips_df.join(
+              strong_clips_df, on="clip_id", how="anti"
+          ).height
+      else:
+          strong_clips = 0
+          only_weak_clips = 0
       
       # Per-class statistics in the expected format
       class_stats_formatted = {}
-      class_names = list(set(self.annotations_df["class_name"].to_list())) if len(self.annotations_df) > 0 else []
+      all_class_names = self.get_class_names()
       
       for i in range(self.num_classes):
           class_key = f"class_{i}"
-          class_name = class_names[i] if i < len(class_names) else None
+          class_name = all_class_names[i] if i < len(all_class_names) else None
           
           if class_name and class_name in class_stats:
               # Strong labels = present + not_present for this class
@@ -438,8 +466,8 @@ class Audio_DB:
       
       return {
           "total_clips": total_clips,
-          "clips_with_strong_labels": definitive_annotations,  # Clips with definitive annotations
-          "clips_with_only_weak_labels": uncertain_annotations,  # Clips with only uncertain annotations
+          "clips_with_strong_labels": strong_clips,  # Unique clips with definitive annotations
+          "clips_with_only_weak_labels": only_weak_clips,  # Unique clips with only uncertain annotations
           "per_class_statistics": class_stats_formatted
       }
   
@@ -516,26 +544,113 @@ class Audio_DB:
       
       return similar_clips, top_similarities, np.array(original_indices)
   
+  def _parse_exported_filename(self, filename):
+    """
+    Parse an exported filename to extract source, start time, and labels.
+
+    Format: {original_filename}_{clip_start}-{class_labels}.wav
+    Example: OLY_38927-4_20210713_064831_0.0-pacwre1_song_1.wav
+
+    Args:
+        filename (str): Exported filename
+
+    Returns:
+        tuple: (source_name, clip_start, labels_set) or (None, None, None) if parsing fails
+    """
+    try:
+        # Remove .wav extension
+        name_without_ext = filename.replace('.wav', '').replace('.WAV', '')
+
+        # Split on LAST hyphen to separate {filename}_{time} from {labels}
+        parts = name_without_ext.rsplit('-', 1)
+        if len(parts) != 2:
+            return (None, None, None)
+
+        filename_and_time = parts[0]  # e.g., 'OLY_38927-4_20210713_064831_0.0'
+        labels_str = parts[1]  # e.g., 'pacwre1_song_1' or 'Class1+Class2'
+
+        # Split on LAST underscore to separate {filename} from {time}
+        parts2 = filename_and_time.rsplit('_', 1)
+        if len(parts2) != 2:
+            return (None, None, None)
+
+        source_name = parts2[0]  # e.g., 'OLY_38927-4_20210713_064831'
+        clip_start = float(parts2[1])  # e.g., 0.0
+
+        # Parse labels (separated by '+')
+        if labels_str == 'empty':
+            labels = set()
+        else:
+            labels = set(labels_str.split('+'))
+
+        return (source_name, clip_start, labels)
+    except Exception as e:
+        print(f"Failed to parse filename {filename}: {e}")
+        return (None, None, None)
+
+  def _scan_existing_exports(self, export_path):
+    """
+    Scan export folder and index existing exported clips.
+
+    Args:
+        export_path (str): Directory to scan
+
+    Returns:
+        dict: {(source_name, clip_start): (filepath, labels_set)}
+    """
+    import os
+    from pathlib import Path
+
+    existing_clips = {}
+    export_dir = Path(export_path)
+
+    if not export_dir.exists():
+        return existing_clips
+
+    # Find all WAV files
+    for wav_file in export_dir.glob("*.wav"):
+        source, start, labels = self._parse_exported_filename(wav_file.name)
+        if source is not None and start is not None:
+            key = (source, start)
+            existing_clips[key] = (str(wav_file), labels)
+
+    for wav_file in export_dir.glob("*.WAV"):
+        source, start, labels = self._parse_exported_filename(wav_file.name)
+        if source is not None and start is not None:
+            key = (source, start)
+            existing_clips[key] = (str(wav_file), labels)
+
+    print(f"Found {len(existing_clips)} existing clips in export folder")
+    return existing_clips
+
   def export_wav_clips(self, export_path, annotation_slug, sr=None):
     """
     Export annotated audio clips as WAV files using the three-table structure.
-    
+    Intelligently handles incremental exports by:
+    - Skipping unchanged clips
+    - Updating filenames when labels change
+    - Only exporting new clips
+
     Args:
         export_path (str): Directory path where the WAV files will be saved.
         annotation_slug (str): String to add to filenames as an annotation identifier.
         sr (int, optional): Sampling rate for the exported files. If None, uses the original sampling rate.
-    
+
     Returns:
-        tuple: (num_positive_exported, num_negative_exported, num_uncertain_exported) - Count of exported clips by type
+        dict: Export statistics including counts of new, updated, skipped, and existing clips
     """
     import os
     import librosa
     import soundfile as sf
     import json
     from datetime import datetime
-    
+    from pathlib import Path
+
     # Create the export directory if it doesn't exist
     os.makedirs(export_path, exist_ok=True)
+
+    # Scan for existing exports
+    existing_clips = self._scan_existing_exports(export_path)
     
     # Get all clips that have annotations using the annotations table
     annotated_clip_ids = set()
@@ -554,6 +669,9 @@ class Audio_DB:
     
     # Track successful exports and metadata
     clips_exported = 0
+    clips_skipped = 0
+    clips_updated = 0
+    clips_new = 0
     export_metadata = {
         "export_info": {
             "export_date": datetime.now().isoformat(),
@@ -563,10 +681,10 @@ class Audio_DB:
         },
         "clips": []
     }
-    
+
     def export_single_clip(row_dict):
-        """Helper function to export a single clip using the new three-table structure"""
-        nonlocal clips_exported
+        """Helper function to export a single clip with smart update/skip logic"""
+        nonlocal clips_exported, clips_skipped, clips_updated, clips_new
         
         # Extract clip details
         clip_id = row_dict['clip_id']
@@ -587,17 +705,42 @@ class Audio_DB:
                 annotations_by_class[class_name] = label
         
         # Determine positive classes (those labeled as "present")
-        positive_classes = [class_name for class_name, label in annotations_by_class.items() if label == "present"]
-        
+        positive_classes = sorted([class_name for class_name, label in annotations_by_class.items() if label == "present"])
+        current_labels = set(positive_classes)
+
         # Skip if no annotations at all
         if not annotations_by_class:
             print(f"Skipping clip {clip_id} - no annotations found")
             return
-        
+
+        # Check if this clip already exists in export folder
+        clip_key = (file_name, clip_start)
+        already_exists = clip_key in existing_clips
+
+        if already_exists:
+            existing_path, existing_labels = existing_clips[clip_key]
+
+            # Compare labels
+            if current_labels == existing_labels:
+                # Labels unchanged - skip export
+                print(f"⏭️  Skipping {file_name}_{clip_start:.1f} - no label changes")
+                clips_skipped += 1
+                return
+            else:
+                # Labels changed - update filename
+                print(f"🔄 Updating {file_name}_{clip_start:.1f} - labels changed from {existing_labels} to {current_labels}")
+                # Delete old file (we'll export with new name)
+                if os.path.exists(existing_path):
+                    os.remove(existing_path)
+                clips_updated += 1
+        else:
+            # New clip
+            clips_new += 1
+
         try:
             # Load audio data for the clip
             audio, _ = librosa.load(file_path, sr=original_sr, offset=clip_start, duration=clip_end-clip_start)
-            
+
             # Resample if needed
             target_sr = sr or original_sr
             if target_sr != original_sr:
@@ -605,22 +748,23 @@ class Audio_DB:
                 export_sr = target_sr
             else:
                 export_sr = original_sr
-            
-            # Create filename based on positive classes
+
+            # Create filename based on positive classes (already sorted)
             if positive_classes:
                 classes_str = "+".join(positive_classes)
                 output_filename = f"{file_name}_{clip_start:.1f}-{classes_str}.wav"
             else:
                 # No positive classes - this is a negative example
                 output_filename = f"{file_name}_{clip_start:.1f}-empty.wav"
-            
+
             output_path = os.path.join(export_path, output_filename)
-            
+
             # Save as WAV file
             sf.write(output_path, audio, export_sr)
             clips_exported += 1
-            
-            print(f"Exported clip {clips_exported}: {output_filename}")
+
+            action = "🆕 Exported new" if not already_exists else "✅ Updated"
+            print(f"{action} clip {clips_exported}: {output_filename}")
             
             # Add comprehensive metadata for this clip
             clip_metadata = {
@@ -673,24 +817,45 @@ class Audio_DB:
         if (i+1) % 10 == 0:
             print(f"Exported {clips_exported}/{num_total} clips...")
     
-    # Update total count in metadata
+    # Update metadata with all statistics
     export_metadata["export_info"]["total_clips_exported"] = clips_exported
     export_metadata["export_info"]["positive_clips"] = positive_count
-    export_metadata["export_info"]["negative_clips"] = negative_count  
+    export_metadata["export_info"]["negative_clips"] = negative_count
     export_metadata["export_info"]["uncertain_clips"] = uncertain_count
-    
+    export_metadata["export_info"]["clips_new"] = clips_new
+    export_metadata["export_info"]["clips_updated"] = clips_updated
+    export_metadata["export_info"]["clips_skipped"] = clips_skipped
+    export_metadata["export_info"]["clips_in_export_folder"] = len(existing_clips)
+
     # Export metadata JSON file
     metadata_path = f"{export_path}/export_metadata.json"
     with open(metadata_path, 'w') as f:
         json.dump(export_metadata, f, indent=2)
-    
-    print(f"Exported {clips_exported} clips total:")
-    print(f"  - Positive clips: {positive_count}")
-    print(f"  - Negative clips: {negative_count}")
-    print(f"  - Uncertain clips: {uncertain_count}")
-    print(f"  - Metadata saved to: {metadata_path}")
-    
-    return (positive_count, negative_count, uncertain_count)
+
+    print(f"\n{'='*60}")
+    print(f"Export Summary:")
+    print(f"{'='*60}")
+    print(f"🆕 New clips exported:     {clips_new}")
+    print(f"🔄 Clips updated:          {clips_updated}")
+    print(f"⏭️  Clips skipped:          {clips_skipped}")
+    print(f"📁 Total clips exported:   {clips_exported}")
+    print(f"---")
+    print(f"✅ Positive clips:         {positive_count}")
+    print(f"❌ Negative clips:         {negative_count}")
+    print(f"❓ Uncertain clips:        {uncertain_count}")
+    print(f"📄 Metadata saved to:      {metadata_path}")
+    print(f"{'='*60}\n")
+
+    return {
+        "positive_clips": positive_count,
+        "negative_clips": negative_count,
+        "uncertain_clips": uncertain_count,
+        "total_clips": clips_exported,
+        "clips_new": clips_new,
+        "clips_updated": clips_updated,
+        "clips_skipped": clips_skipped,
+        "existing_in_folder": len(existing_clips)
+    }
   
   # Convenience methods for querying the new structure
   def get_files_df(self) -> pl.DataFrame:
@@ -772,7 +937,79 @@ class Audio_DB:
       except Exception as e:
           print(f"ERROR in add_annotation: {e}")
           raise
-  
+
+  def delete_annotation(self, clip_id: str, class_name: str) -> None:
+      """Delete an annotation for a specific clip and class."""
+      print(f"DEBUG: delete_annotation called with clip_id={clip_id}, class_name={class_name}")
+      try:
+          initial_length = len(self.annotations_df)
+          self.annotations_df = self.annotations_df.filter(
+              ~((pl.col("clip_id") == clip_id) & (pl.col("class_name") == class_name))
+          )
+          final_length = len(self.annotations_df)
+          deleted_count = initial_length - final_length
+          print(f"DEBUG: Deleted {deleted_count} annotation(s)")
+
+          # Reset annotation_status for this class to 4 (unreviewed)
+          if deleted_count > 0:
+              # Get the class index
+              class_index = self._current_class_index if hasattr(self, '_current_class_index') else None
+              if class_index is None:
+                  class_names = list(self.get_class_names())
+                  if class_name in class_names:
+                      class_index = class_names.index(class_name)
+
+              if class_index is not None:
+                  # Get current annotation_status arrays
+                  current_annotations = self.clips_df['annotation_status'].to_list()
+
+                  # Find the clip and reset its annotation_status for this class
+                  clip_indices = self.clips_df.with_row_index().filter(pl.col("clip_id") == clip_id)['index'].to_list()
+
+                  for i in clip_indices:
+                      if i < len(current_annotations):
+                          current_annotations[i][class_index] = 4  # 4 = unreviewed
+
+                  # Update the clips dataframe
+                  self.clips_df = self.clips_df.with_columns([
+                      pl.Series(current_annotations).alias('annotation_status')
+                  ])
+                  print(f"DEBUG: Reset annotation_status for clip {clip_id}, class_index {class_index} to 4 (unreviewed)")
+      except Exception as e:
+          print(f"ERROR in delete_annotation: {e}")
+          raise
+
+  def get_annotated_clips_only(self, class_name: str = None) -> pl.DataFrame:
+      """
+      Get only clips that have annotations, joined with file information.
+
+      Args:
+          class_name: Optional filter to only get clips annotated for a specific class
+
+      Returns:
+          DataFrame with clips that have annotations, including annotation details
+      """
+      # Get all annotated clip_ids
+      if class_name:
+          annotated_clips = self.annotations_df.filter(
+              pl.col("class_name") == class_name
+          )
+      else:
+          annotated_clips = self.annotations_df
+
+      # Join with clips and files
+      result = self.clips_df.join(
+          annotated_clips,
+          on="clip_id",
+          how="inner"  # Only clips with annotations
+      ).join(
+          self.files_df,
+          on="file_id",
+          how="left"
+      )
+
+      return result
+
   def get_clip_id_by_legacy_info(self, file_path: str, clip_start: float, clip_end: float) -> str:
       """Get clip_id using legacy file path and time information."""
       result = self.get_clip_by_legacy_info(file_path, clip_start, clip_end)

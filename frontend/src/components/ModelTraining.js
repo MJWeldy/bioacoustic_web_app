@@ -18,7 +18,15 @@ const ModelTraining = () => {
   const [modelType, setModelType] = useState(2);
   const [verbose, setVerbose] = useState(true);
   const [weakNegWeight, setWeakNegWeight] = useState(0.05);
-  
+
+  // Early stopping and learning rate reduction parameters
+  const [enableEarlyStopping, setEnableEarlyStopping] = useState(true);
+  const [enableLrReduction, setEnableLrReduction] = useState(true);
+  const [lrRedux, setLrRedux] = useState(0.5);
+  const [patience, setPatience] = useState(5000);
+  const [lrReducePatience, setLrReducePatience] = useState(1000);
+  const [metricForTracking, setMetricForTracking] = useState('cmap');  // 'cmap' or 'auc'
+
   const [isLoading, setIsLoading] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState(null);
   const [trainingResults, setTrainingResults] = useState(null);
@@ -90,7 +98,13 @@ const ModelTraining = () => {
           learning_rate: learningRate,
           model_type: modelType,
           verbose: verbose,
-          weak_neg_weight: weakNegWeight
+          weak_neg_weight: weakNegWeight,
+          enable_early_stopping: enableEarlyStopping,
+          enable_lr_reduction: enableLrReduction,
+          lr_redux: lrRedux,
+          patience: patience,
+          lr_reduce_patience: lrReducePatience,
+          metric_for_tracking: metricForTracking
         }
       };
 
@@ -657,8 +671,8 @@ const ModelTraining = () => {
                   checked={verbose}
                   onChange={(e) => setVerbose(e.target.checked)}
                   disabled={isLoading}
-                  style={{ 
-                    width: '18px', 
+                  style={{
+                    width: '18px',
                     height: '18px',
                     accentColor: '#6e7cb9'
                   }}
@@ -671,6 +685,141 @@ const ModelTraining = () => {
                 Show detailed training progress. If unchecked, only final loss and cMAP will be shown.
               </small>
             </div>
+          </div>
+
+          <div style={{ marginTop: '1.5rem', borderTop: '1px solid #e0e0e0', paddingTop: '1.5rem' }}>
+            <h4 style={{ marginBottom: '1rem' }}>Advanced Training Options</h4>
+
+            <div className="grid grid-2">
+              <div className="form-group">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <input
+                    type="checkbox"
+                    id="enableEarlyStopping"
+                    checked={enableEarlyStopping}
+                    onChange={(e) => setEnableEarlyStopping(e.target.checked)}
+                    disabled={isLoading}
+                    style={{
+                      width: '18px',
+                      height: '18px',
+                      accentColor: '#6e7cb9'
+                    }}
+                  />
+                  <label htmlFor="enableEarlyStopping" style={{ margin: 0, cursor: 'pointer', fontWeight: '600' }}>
+                    Enable Early Stopping
+                  </label>
+                </div>
+                <small style={{ color: '#666', fontSize: '0.875rem', display: 'block', marginTop: '0.25rem' }}>
+                  Stop training when validation loss stops improving
+                </small>
+              </div>
+
+              <div className="form-group">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <input
+                    type="checkbox"
+                    id="enableLrReduction"
+                    checked={enableLrReduction}
+                    onChange={(e) => setEnableLrReduction(e.target.checked)}
+                    disabled={isLoading}
+                    style={{
+                      width: '18px',
+                      height: '18px',
+                      accentColor: '#6e7cb9'
+                    }}
+                  />
+                  <label htmlFor="enableLrReduction" style={{ margin: 0, cursor: 'pointer', fontWeight: '600' }}>
+                    Enable Learning Rate Reduction
+                  </label>
+                </div>
+                <small style={{ color: '#666', fontSize: '0.875rem', display: 'block', marginTop: '0.25rem' }}>
+                  Reduce learning rate when validation loss plateaus
+                </small>
+              </div>
+            </div>
+
+            <div className="form-group" style={{ marginTop: '1rem' }}>
+              <label htmlFor="metricForTracking" style={{ fontWeight: '600' }}>Best Model Tracking Metric</label>
+              <select
+                id="metricForTracking"
+                className="form-control"
+                value={metricForTracking}
+                onChange={(e) => setMetricForTracking(e.target.value)}
+                disabled={isLoading}
+              >
+                <option value="cmap">Macro cMAP (Class Mean Average Precision)</option>
+                <option value="auc">Macro AUC (Area Under Curve)</option>
+                <option value="geomean">Geometric Mean (AUC × cMAP)</option>
+                <option value="loss">Test Data Loss (minimize)</option>
+              </select>
+              <small style={{ color: '#666', fontSize: '0.875rem', display: 'block', marginTop: '0.25rem' }}>
+                Choose which metric to use for saving the best model weights during training
+              </small>
+            </div>
+
+            {(enableEarlyStopping || enableLrReduction) && (
+              <div className="grid grid-2" style={{ marginTop: '1rem' }}>
+                {enableEarlyStopping && (
+                  <div className="form-group">
+                    <label htmlFor="patience">Early Stopping Patience</label>
+                    <input
+                      type="number"
+                      id="patience"
+                      className="form-control"
+                      min="100"
+                      max="20000"
+                      step="100"
+                      value={patience}
+                      onChange={(e) => setPatience(parseInt(e.target.value))}
+                      disabled={isLoading}
+                    />
+                    <small style={{ color: '#666', fontSize: '0.875rem' }}>
+                      Number of steps to wait before stopping (default: 5000)
+                    </small>
+                  </div>
+                )}
+
+                {enableLrReduction && (
+                  <>
+                    <div className="form-group">
+                      <label htmlFor="lrReducePatience">LR Reduction Patience</label>
+                      <input
+                        type="number"
+                        id="lrReducePatience"
+                        className="form-control"
+                        min="10"
+                        max="10000"
+                        step="10"
+                        value={lrReducePatience}
+                        onChange={(e) => setLrReducePatience(parseInt(e.target.value))}
+                        disabled={isLoading}
+                      />
+                      <small style={{ color: '#666', fontSize: '0.875rem' }}>
+                        Steps to wait before reducing LR (default: 1000)
+                      </small>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="lrRedux">LR Reduction Factor</label>
+                      <input
+                        type="number"
+                        id="lrRedux"
+                        className="form-control"
+                        min="0.1"
+                        max="0.9"
+                        step="0.05"
+                        value={lrRedux}
+                        onChange={(e) => setLrRedux(parseFloat(e.target.value))}
+                        disabled={isLoading}
+                      />
+                      <small style={{ color: '#666', fontSize: '0.875rem' }}>
+                        Factor to multiply LR by (0.5 = halve LR, default: 0.5)
+                      </small>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

@@ -22,6 +22,7 @@ from modules import config as cfg
 from modules import database as db
 from modules import utilities as u
 from modules import classifier as tc
+from modules import validation_db as vdb
 
 app = FastAPI(title="Bioacoustics Active Learning", version="1.0.0")
 
@@ -59,7 +60,8 @@ app_state = {
     "backend_model": None,
     "dataset_path": None,
     "save_path": None,
-    "review_mode": "random"  # Default review mode
+    "review_mode": "random",  # Default review mode
+    "validation_db": None  # Validation database instance
 }
 
 # Evaluation-specific state
@@ -123,13 +125,19 @@ class SpectrogramRequest(BaseModel):
 
 class TrainingParams(BaseModel):
     model_config = {'protected_namespaces': ()}
-    
+
     n_steps: int = 1000
     batch_size: int = 128
     learning_rate: float = 0.001
     model_type: int = 2
     verbose: bool = True
     weak_neg_weight: float = 0.05
+    enable_early_stopping: bool = True
+    enable_lr_reduction: bool = True
+    lr_redux: float = 0.5
+    patience: int = 5000
+    lr_reduce_patience: int = 1000
+    metric_for_tracking: str = 'cmap'  # 'cmap' or 'auc'
 
 class ModelTrainingConfig(BaseModel):
     model_config = {'protected_namespaces': ()}
@@ -235,8 +243,10 @@ def build_dataset_thread(config: DatasetConfig):
         building_state["progress"] = 85
         
         # Create audio database with number of classes
-        num_classes = len(config.class_map)
+        class_map = {item.name: item.value for item in config.class_map}
+        num_classes = len(class_map)
         audio_db = db.Audio_DB(num_classes=num_classes)
+        audio_db.class_map = class_map
         embedding_index = 0  # Track embedding indices as clips are created
         
         for i, file_path in enumerate(files):
@@ -474,16 +484,16 @@ class ReviewModeRequest(BaseModel):
 @app.post("/api/active-learning/set-review-mode")
 async def set_review_mode(request: ReviewModeRequest):
     """Set the review mode for clip selection"""
-    valid_modes = ["random", "top_down", "top_10+score_quantiles"]
-    
+    valid_modes = ["random", "top_down", "top_10+score_quantiles", "review_annotated"]
+
     if request.review_mode not in valid_modes:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail=f"Invalid review mode. Must be one of: {', '.join(valid_modes)}"
         )
-    
+
     app_state["review_mode"] = request.review_mode
-    
+
     return {
         "status": "success",
         "message": f"Review mode set to: {request.review_mode}",
@@ -914,8 +924,11 @@ async def load_dataset(dataset_path: str):
                 os.environ["BACKEND"] = metadata["dataset_info"]["backend_model"]
         
         # Load database with number of classes from metadata
-        num_classes = len(metadata.get("class_map", {})) if metadata else 1
+        class_map = metadata.get("class_map", {}) if metadata else {}
+        num_classes = len(class_map) if class_map else 1
         audio_db = db.Audio_DB(num_classes=num_classes)
+        if class_map:
+            audio_db.class_map = class_map
         
         # Load from the three-table structure using load_db method
         # Pass any file path from the dataset directory - load_db will find the three tables
@@ -1081,26 +1094,73 @@ async def get_clips(filter_config: FilterConfig):
     """Get filtered clips for annotation"""
     if app_state["audio_db"] is None:
         raise HTTPException(status_code=400, detail="No dataset loaded")
-    
+
     try:
         # Import the WebAnnotationInterface
         from modules.display_web import WebAnnotationInterface
-        
+
         # Create annotation interface with current review mode
         review_mode = app_state.get("review_mode", "random")
         annotation_interface = WebAnnotationInterface(
-            app_state["audio_db"], 
+            app_state["audio_db"],
             review_mode=review_mode
         )
-        
-        # Get filtered clips using the annotation interface
-        filtered_df = annotation_interface.get_filtered_clips(
-            score_min=filter_config.score_min,
-            score_max=filter_config.score_max,
-            annotation_filter=filter_config.annotation_filter
-        )
-        
-        # Get the next clip based on review mode
+
+        # For review_annotated mode, get only annotated clips
+        if review_mode == "review_annotated":
+            # Get current class name
+            class_names = app_state["audio_db"].get_class_names()
+            current_class_index = getattr(app_state["audio_db"], '_current_class_index', 0)
+            class_name = class_names[current_class_index]
+
+            # Get annotated clips for the current class
+            filtered_df = annotation_interface.get_annotated_clips_for_review(class_name)
+        else:
+            # Get filtered clips using the annotation interface
+            filtered_df = annotation_interface.get_filtered_clips(
+                score_min=filter_config.score_min,
+                score_max=filter_config.score_max,
+                annotation_filter=filter_config.annotation_filter
+            )
+
+        # For quantile mode, generate the full round and return all clips with metadata
+        if review_mode == "top_10+score_quantiles":
+            # Generate the round
+            round_clips_indices, round_metadata = annotation_interface._generate_quantile_round_clips()
+
+            # Build list of clips with their round metadata
+            clips_with_metadata = []
+            for i, clip_index in enumerate(round_clips_indices):
+                clip_row = filtered_df.row(clip_index)
+                clip_dict = dict(zip(filtered_df.columns, clip_row))
+
+                # Convert types and add round metadata
+                converted_dict = {}
+                for key, value in clip_dict.items():
+                    if hasattr(value, 'item'):
+                        converted_dict[key] = value.item()
+                    elif isinstance(value, list) and len(value) > 0 and hasattr(value[0], 'item'):
+                        converted_dict[key] = [v.item() if hasattr(v, 'item') else v for v in value]
+                    else:
+                        converted_dict[key] = value
+
+                # Add round metadata
+                converted_dict["round_position"] = i + 1
+                converted_dict["round_total"] = len(round_clips_indices)
+                converted_dict["round_category"] = round_metadata[i]["category"]
+                converted_dict["round_category_label"] = round_metadata[i]["category_label"]
+
+                clips_with_metadata.append(converted_dict)
+
+            return {
+                "clips": clips_with_metadata,
+                "total_count": len(clips_with_metadata),
+                "next_clip": clips_with_metadata[0] if clips_with_metadata else None,
+                "review_mode": review_mode,
+                "is_quantile_round": True
+            }
+
+        # For other modes, get next clip normally
         next_clip = annotation_interface.get_next_clip()
         
         # Convert filtered dataframe to list of dicts with proper type conversion
@@ -1372,37 +1432,166 @@ async def save_database():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/active-learning/export-clips")
-async def export_clips(export_path: str, annotation_slug: str = "export"):
-    """Export annotated clips as WAV files with enhanced metadata"""
+@app.get("/api/active-learning/check-export-folder")
+async def check_export_folder(export_path: str):
+    """Check export folder for existing clips before exporting"""
     if app_state["audio_db"] is None:
         raise HTTPException(status_code=400, detail="No dataset loaded")
-    
+
+    try:
+        from pathlib import Path
+
+        # Scan existing exports
+        existing_clips = app_state["audio_db"]._scan_existing_exports(export_path)
+
+        return {
+            "status": "success",
+            "existing_clips_count": len(existing_clips),
+            "folder_exists": Path(export_path).exists()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/active-learning/export-clips")
+async def export_clips(export_path: str, annotation_slug: str = "export"):
+    """Export annotated clips as WAV files with smart incremental updates"""
+    if app_state["audio_db"] is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded")
+
     try:
         # Pass class_map to the database for metadata export
         if app_state["class_map"]:
             app_state["audio_db"].class_map = app_state["class_map"]
-            
-        positive_count, negative_count, uncertain_count = app_state["audio_db"].export_wav_clips(
-            export_path, annotation_slug
-        )
-        
-        total_count = positive_count + negative_count + uncertain_count
-        
+
+        # Get export statistics
+        stats = app_state["audio_db"].export_wav_clips(export_path, annotation_slug)
+
+        # Build message based on what happened
+        if stats["clips_new"] > 0 and stats["clips_updated"] > 0:
+            action_msg = f"Exported {stats['clips_new']} new clips and updated {stats['clips_updated']} existing clips"
+        elif stats["clips_new"] > 0:
+            action_msg = f"Exported {stats['clips_new']} new clips"
+        elif stats["clips_updated"] > 0:
+            action_msg = f"Updated {stats['clips_updated']} existing clips"
+        else:
+            action_msg = "No new or updated clips"
+
+        if stats["clips_skipped"] > 0:
+            action_msg += f" (skipped {stats['clips_skipped']} unchanged)"
+
         return {
             "status": "success",
-            "positive_clips": positive_count,
-            "negative_clips": negative_count,
-            "uncertain_clips": uncertain_count,
-            "total_clips": total_count,
-            "message": f"Exported {total_count} clips ({positive_count} positive, {negative_count} negative, {uncertain_count} uncertain) with enhanced metadata"
+            "positive_clips": stats["positive_clips"],
+            "negative_clips": stats["negative_clips"],
+            "uncertain_clips": stats["uncertain_clips"],
+            "total_clips": stats["total_clips"],
+            "clips_new": stats["clips_new"],
+            "clips_updated": stats["clips_updated"],
+            "clips_skipped": stats["clips_skipped"],
+            "existing_in_folder": stats["existing_in_folder"],
+            "message": action_msg
         }
-        
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/active-learning/review-clips")
+async def get_review_clips():
+    """Get annotated clips for review mode"""
+    if app_state["audio_db"] is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded")
+
+    try:
+        # Import the WebAnnotationInterface
+        from modules.display_web import WebAnnotationInterface
+
+        # Get current class information
+        current_class_index = app_state.get("current_class_index", 0)
+        if app_state["class_map"] is None:
+            raise HTTPException(status_code=400, detail="No class map available")
+
+        class_names = list(app_state["class_map"].keys())
+        if current_class_index >= len(class_names):
+            raise HTTPException(status_code=400, detail="Invalid class index")
+
+        class_name = class_names[current_class_index]
+
+        # Create annotation interface
+        review_mode = app_state.get("review_mode", "top_down")
+        annotation_interface = WebAnnotationInterface(
+            app_state["audio_db"],
+            review_mode=review_mode
+        )
+
+        # Get annotated clips for the current class
+        annotated_df = annotation_interface.get_annotated_clips_for_review(class_name)
+
+        # Get the next clip for review
+        next_clip = annotation_interface.get_next_clip()
+
+        # Convert dataframe to list of dicts
+        clips = []
+        for row_dict in annotated_df.to_dicts():
+            # Convert numpy/polars types to native Python types
+            converted_dict = {}
+            for key, value in row_dict.items():
+                if hasattr(value, 'item'):  # numpy scalar
+                    converted_dict[key] = value.item()
+                elif isinstance(value, list) and len(value) > 0 and hasattr(value[0], 'item'):
+                    converted_dict[key] = [v.item() if hasattr(v, 'item') else v for v in value]
+                else:
+                    converted_dict[key] = value
+            clips.append(converted_dict)
+
+        return {
+            "clips": clips,
+            "total_count": len(clips),
+            "next_clip": next_clip,
+            "review_mode": review_mode,
+            "class_name": class_name
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/active-learning/annotation")
+async def delete_annotation(clip_id: str, class_name: str = None):
+    """Delete an annotation for a specific clip and class"""
+    if app_state["audio_db"] is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded")
+
+    try:
+        # If no class_name provided, use current class
+        if class_name is None:
+            current_class_index = app_state.get("current_class_index", 0)
+            if app_state["class_map"] is None:
+                raise HTTPException(status_code=400, detail="No class map available")
+
+            class_names = list(app_state["class_map"].keys())
+            if current_class_index >= len(class_names):
+                raise HTTPException(status_code=400, detail="Invalid class index")
+
+            class_name = class_names[current_class_index]
+
+        # Delete the annotation
+        print(f"DEBUG: Deleting annotation for clip_id={clip_id}, class_name={class_name}")
+        app_state["audio_db"].delete_annotation(clip_id, class_name)
+
+        # Auto-save the database
+        dataset_path = app_state.get("dataset_path")
+        if dataset_path:
+            db_path = Path(dataset_path) / "audio_database.parquet"
+            app_state["audio_db"].save_db(str(db_path))
+            print(f"DEBUG: Auto-saved database after deletion to {db_path}")
+
+        return {"status": "success", "message": "Annotation deleted and database saved"}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/spectrogram")
-async def generate_spectrogram(request: SpectrogramRequest):
+def generate_spectrogram(request: SpectrogramRequest):
     """Generate spectrogram data for a clip"""
     try:
         import matplotlib
@@ -1454,6 +1643,15 @@ async def generate_spectrogram(request: SpectrogramRequest):
             cmap=cmap
         )
         
+        # Format X-axis to mm:ss
+        from matplotlib.ticker import FuncFormatter
+        def format_m_s(x, pos):
+            minutes = int(x // 60)
+            seconds = int(x % 60)
+            return f"{minutes:02d}:{seconds:02d}"
+        
+        plt.gca().xaxis.set_major_formatter(FuncFormatter(format_m_s))
+        
         plt.colorbar(format='%+2.0f dB')
         
         # Add clip boundaries
@@ -1477,29 +1675,25 @@ async def generate_spectrogram(request: SpectrogramRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/audio/{file_path:path}")
-async def get_audio_clip(file_path: str, clip_start: float, clip_end: float):
+def get_audio_clip(file_path: str, clip_start: float, clip_end: float):
     """Extract and return audio clip"""
     try:
-        # Load the specific clip
-        audio = u.load_audio(file_path, None)
-        start_idx = int(clip_start * cfg.TARGET_SR)
-        end_idx = int(clip_end * cfg.TARGET_SR)
-        
-        # Ensure indices are within bounds
-        start_idx = max(0, min(start_idx, len(audio) - 1))
-        end_idx = max(start_idx + 1, min(end_idx, len(audio)))
-        
-        clip_audio = audio[start_idx:end_idx]
-        
-        # Convert to bytes for streaming
         import soundfile as sf
         import io
+        from fastapi.responses import StreamingResponse
+
+        # Get file info to get original sampling rate
+        with sf.SoundFile(file_path) as f:
+            original_sr = f.samplerate
         
+        # Load only the specific clip segment
+        clip_audio = u.load_audio(file_path, (clip_start, clip_end, original_sr))
+        
+        # Convert to bytes for streaming
         buffer = io.BytesIO()
         sf.write(buffer, clip_audio, cfg.TARGET_SR, format='WAV')
         buffer.seek(0)
         
-        from fastapi.responses import StreamingResponse
         return StreamingResponse(
             io.BytesIO(buffer.getvalue()),
             media_type="audio/wav",
@@ -2479,9 +2673,9 @@ def training_thread(config: ModelTrainingConfig):
         
         # Call fit_w_tape function with full save path
         full_save_path = config.model_save_path
-        
-        # Call fit_w_tape with label strength support and weak_neg_weight=0.05
-        classifier_model, train_losses, val_losses, cmaps = tc.fit_w_tape(
+
+        # Call fit_w_tape with label strength support and optional early stopping/lr reduction
+        classifier_model, train_losses, val_losses, cmaps, aucs, geomeans = tc.fit_w_tape(
             X_train,
             y_train,
             X_test,
@@ -2494,15 +2688,37 @@ def training_thread(config: ModelTrainingConfig):
             config.training_params.verbose,
             label_strength=strength_train,
             eval_label_strength=strength_test,
-            weak_neg_weight=config.training_params.weak_neg_weight
+            weak_neg_weight=config.training_params.weak_neg_weight,
+            enable_early_stopping=config.training_params.enable_early_stopping,
+            enable_lr_reduction=config.training_params.enable_lr_reduction,
+            lr_redux=config.training_params.lr_redux,
+            patience=config.training_params.patience,
+            lr_reduce_patience=config.training_params.lr_reduce_patience,
+            metric_for_tracking=config.training_params.metric_for_tracking
         )
         
         # Add final metrics to logs
         try:
             final_loss = train_losses[-1] if train_losses and len(train_losses) > 0 else None
             best_cmap = max(cmaps) if cmaps and len(cmaps) > 0 and all(isinstance(x, (int, float)) and not np.isnan(x) for x in cmaps) else None
+            best_auc = max(aucs) if aucs and len(aucs) > 0 and all(isinstance(x, (int, float)) and not np.isnan(x) for x in aucs) else None
+            best_geomean = max(geomeans) if geomeans and len(geomeans) > 0 and all(isinstance(x, (int, float)) and not np.isnan(x) for x in geomeans) else None
+            min_val_loss = min(val_losses) if val_losses and len(val_losses) > 0 and all(isinstance(x, (int, float)) and not np.isnan(x) for x in val_losses) else None
+
             training_state["logs"].append(f"Final loss: {final_loss}")
             training_state["logs"].append(f"Macro cMAP of best fit: {best_cmap}")
+            training_state["logs"].append(f"Macro AUC of best fit: {best_auc}")
+            training_state["logs"].append(f"Geometric Mean of best fit: {best_geomean}")
+            training_state["logs"].append(f"Minimum validation loss: {min_val_loss}")
+
+            if config.training_params.metric_for_tracking == 'auc':
+                training_state["logs"].append(f"Model tracking metric: Macro AUC")
+            elif config.training_params.metric_for_tracking == 'geomean':
+                training_state["logs"].append(f"Model tracking metric: Geometric Mean (AUC × cMAP)")
+            elif config.training_params.metric_for_tracking == 'loss':
+                training_state["logs"].append(f"Model tracking metric: Test Data Loss (minimize)")
+            else:
+                training_state["logs"].append(f"Model tracking metric: Macro cMAP")
             
             if config.training_params.verbose:
                 training_state["logs"].append("Training completed with verbose output to console")
@@ -2728,6 +2944,1189 @@ async def preview_training_data(training_audio_folder: str, metadata_path: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Validation System Endpoints
+@app.post("/api/validation/load-predictions")
+async def load_validation_predictions(request: Request):
+    """Load prediction data for validation workflow"""
+    body = await request.json()
+    predictions_path = body.get("predictions_path")
+    audio_directory = body.get("audio_directory")
+    model_name = body.get("model_name")
+    format_type = body.get("format_type", "auto")
+    recursive = body.get("recursive", True)
+    replace_existing = body.get("replace_existing", True)
+    use_pnw_cnet_format = body.get("use_pnw_cnet_format", False)
+    pnw_cnet_strata_field = body.get("pnw_cnet_strata_field", "site_station")
+    save_location = body.get("save_location")  # User's specified save location
+
+    if not predictions_path or not model_name:
+        raise HTTPException(status_code=400, detail="predictions_path and model_name are required")
+
+    try:
+        print(f"DEBUG: Loading predictions from: {predictions_path}")
+        print(f"DEBUG: Model name: {model_name}")
+        print(f"DEBUG: PNW-CNet format: {use_pnw_cnet_format}")
+        print(f"DEBUG: Audio directory: {audio_directory}")
+
+        # Initialize validation database if not exists, or reinitialize if requested
+        if app_state["validation_db"] is None or replace_existing:
+            print(f"DEBUG: {'Reinitializing' if replace_existing else 'Initializing'} validation database")
+            app_state["validation_db"] = vdb.ValidationDB()
+
+        validation_db = app_state["validation_db"]
+
+        # Check if PNW-CNet format should be used
+        if use_pnw_cnet_format:
+            print(f"DEBUG: Using PNW-CNet loader with strata field: {pnw_cnet_strata_field}")
+            # Use PNW-CNet specific loader
+            result = validation_db.load_pnw_cnet_predictions(
+                file_path=predictions_path,
+                model_name=model_name,
+                audio_directory=audio_directory,
+                replace_existing=False,  # We already cleared at the DB level if needed
+                strata_field=pnw_cnet_strata_field
+            )
+        else:
+            print(f"DEBUG: Using standard CSV loader with format: {format_type}")
+            # Load predictions from CSV file(s) using standard format
+            result = validation_db.load_predictions_from_csv(
+                file_path=predictions_path,
+                format_type=format_type,
+                model_name=model_name,
+                audio_directory=audio_directory,
+                replace_existing=False  # We already cleared at the DB level if needed
+            )
+
+        print(f"DEBUG: Load result status: {result.get('status')}")
+        if result.get('status') == 'error':
+            print(f"ERROR: {result.get('message')}")
+            return result
+
+        # Set project path for future auto-saves if save location is provided
+        if save_location and save_location.strip():
+            validation_db.project_base_path = save_location.strip()
+            # Don't save yet - wait for strata creation
+            print(f"DEBUG: Set project save location to {save_location}. Saving deferred until strata creation.")
+        else:
+            # Warn user that work won't be saved
+            result['no_save_location'] = True
+            print("WARNING: No save location specified - validations will NOT be saved!")
+
+        return result
+
+    except Exception as e:
+        import traceback
+        error_msg = str(e)
+        print(f"ERROR: Exception in load_validation_predictions: {error_msg}")
+        print(f"ERROR: Traceback:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_msg)
+
+@app.post("/api/validation/load-unvalidated-clips")
+async def load_unvalidated_clips(request: Request):
+    """Load unvalidated clips by subdividing audio files into fixed-length windows"""
+    body = await request.json()
+    audio_directory = body.get("audio_directory")
+    clip_window_length = body.get("clip_window_length", 3.0)
+    target_classes = body.get("target_classes", [])
+    strata_column = body.get("strata_column")
+    replace_existing = body.get("replace_existing", True)
+    save_location = body.get("save_location")  # User's specified save location
+
+    if not audio_directory:
+        raise HTTPException(status_code=400, detail="audio_directory is required")
+
+    if not target_classes:
+        raise HTTPException(status_code=400, detail="target_classes is required")
+
+    try:
+        # Initialize validation database if not exists, or reinitialize if requested
+        if app_state["validation_db"] is None or replace_existing:
+            print(f"DEBUG: {'Reinitializing' if replace_existing else 'Initializing'} validation database")
+            app_state["validation_db"] = vdb.ValidationDB()
+
+        validation_db = app_state["validation_db"]
+
+        # Load unvalidated clips
+        result = validation_db.load_unvalidated_clips(
+            audio_directory=audio_directory,
+            clip_window_length=clip_window_length,
+            target_classes=target_classes,
+            strata_column=strata_column,
+            replace_existing=False  # We already cleared at the DB level if needed
+        )
+
+        if result.get('status') == 'error':
+            return result
+
+        # Set project path for future auto-saves if save location is provided
+        if save_location and save_location.strip():
+            validation_db.project_base_path = save_location.strip()
+            # Don't save yet - wait for strata creation
+            print(f"DEBUG: Set project save location to {save_location}. Saving deferred until strata creation.")
+        else:
+            # Warn user that work won't be saved
+            result['no_save_location'] = True
+            print("WARNING: No save location specified - validations will NOT be saved!")
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/validation/load-density-estimation")
+async def load_density_estimation(request: Request):
+    """Load clips for call density estimation using systematic temporal sampling"""
+    body = await request.json()
+    audio_directory = body.get("audio_directory")
+    clip_length = body.get("clip_length", 3.0)
+    target_class = body.get("target_class")
+    sampling_interval = body.get("sampling_interval", 60)
+    clips_per_interval = body.get("clips_per_interval", 5)
+    replace_existing = body.get("replace_existing", True)
+    save_location = body.get("save_location")  # User's specified save location
+
+    if not audio_directory:
+        raise HTTPException(status_code=400, detail="audio_directory is required")
+
+    if not target_class:
+        raise HTTPException(status_code=400, detail="target_class is required")
+
+    try:
+        # Initialize validation database if not exists, or reinitialize if requested
+        if app_state["validation_db"] is None or replace_existing:
+            print(f"DEBUG: {'Reinitializing' if replace_existing else 'Initializing'} validation database")
+            app_state["validation_db"] = vdb.ValidationDB()
+
+        validation_db = app_state["validation_db"]
+
+        # Load density estimation clips
+        result = validation_db.load_density_estimation_clips(
+            audio_directory=audio_directory,
+            clip_length=clip_length,
+            target_class=target_class,
+            sampling_interval=sampling_interval,
+            clips_per_interval=clips_per_interval,
+            replace_existing=False  # We already cleared at the DB level if needed
+        )
+
+        if result.get('status') == 'error':
+            return result
+
+        # Set project path for future auto-saves if save location is provided
+        if save_location and save_location.strip():
+            validation_db.project_base_path = save_location.strip()
+            # Don't save yet - wait for strata creation
+            print(f"DEBUG: Set project save location to {save_location}. Saving deferred until strata creation.")
+        else:
+            # Warn user that work won't be saved
+            result['no_save_location'] = True
+            print("WARNING: No save location specified - validations will NOT be saved!")
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/validation/create-strata")
+async def create_validation_strata(request: Request):
+    """Create validation strata using user-provided strata column"""
+    try:
+        # Optional JSON body parsing (for future extensibility)
+        try:
+            body = await request.json()
+        except:
+            body = {}
+
+        if app_state["validation_db"] is None:
+            raise HTTPException(status_code=400, detail="No prediction data loaded")
+
+        validation_db = app_state["validation_db"]
+
+        # Get confidence threshold from request body if provided
+        confidence_threshold = body.get('confidence_threshold', 0.0)
+
+        result = validation_db.create_strata(confidence_threshold=confidence_threshold)
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/validation/strata")
+async def get_validation_strata():
+    """Get list of available validation strata"""
+    try:
+        if app_state["validation_db"] is None:
+            return {"strata": []}
+
+        validation_db = app_state["validation_db"]
+        strata_summary = validation_db.get_strata_summary()
+
+        return {"strata": strata_summary}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/validation/strata/{strata_id}/species")
+async def get_strata_species(strata_id: str):
+    """Get species available in a specific strata"""
+    try:
+        if app_state["validation_db"] is None:
+            return {"species": []}
+
+        validation_db = app_state["validation_db"]
+
+        # Filter species for the specific strata
+        species_data = validation_db.validation_progress_df.filter(
+            pl.col("strata_id") == strata_id
+        ).select([
+            "species_name",
+            "total_clips",
+            "confirmed_clips"
+        ])
+
+        return {"species": species_data.to_dicts()}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/validation/start-session")
+async def start_validation_session(request: Request):
+    """Start a validation session for a specific strata and species"""
+    print("DEBUG: start_validation_session called")
+    body = await request.json()
+    strata_id = body.get("strata_id")
+    species_name = body.get("species_name")
+    validation_rules = body.get("validation_rules", {})
+    review_mode = body.get("review_mode", False)
+    print(f"DEBUG: Request params - strata_id={strata_id}, species={species_name}, rules={validation_rules}, review_mode={review_mode}")
+
+    if not strata_id or not species_name:
+        raise HTTPException(status_code=400, detail="strata_id and species_name are required")
+
+    try:
+        if app_state["validation_db"] is None:
+            print("DEBUG: validation_db is None!")
+            raise HTTPException(status_code=400, detail="No validation data loaded")
+
+        validation_db = app_state["validation_db"]
+        print(f"DEBUG: validation_db found, predictions_df has {len(validation_db.predictions_df)} rows")
+
+        # Get predictions for this strata and species
+        predictions = validation_db.predictions_df.filter(
+            (pl.col("strata_id") == strata_id) &
+            (pl.col("species_name") == species_name)
+        )
+        print(f"DEBUG: Found {len(predictions)} total predictions for strata_id={strata_id}, species={species_name}")
+
+        # Check for duplicates by filename and time
+        duplicate_check = predictions.group_by(['filename', 'start_time', 'end_time']).agg([
+            pl.count().alias('count')
+        ]).filter(pl.col('count') > 1)
+
+        if len(duplicate_check) > 0:
+            print(f"WARNING: Found {len(duplicate_check)} duplicate clips (same filename + time):")
+            print(duplicate_check.head(5))
+            print(f"Total duplicate instances: {duplicate_check['count'].sum()}")
+
+        # Filter by confidence threshold if specified (only for new validation)
+        confidence_threshold = validation_rules.get("confidence_threshold", 0.0)
+        
+        # Only apply filter if threshold is meaningfully above 0 (avoid floating point precision issues)
+        if confidence_threshold > 1e-6 and not review_mode:
+            before_filter = len(predictions)
+            predictions = predictions.filter(pl.col("confidence") >= confidence_threshold)
+            print(f"DEBUG: After confidence filter: {len(predictions)} (was {before_filter})")
+
+        # Join with annotations to include annotation status
+        annotations = validation_db.validation_annotations_df
+        if len(annotations) > 0:
+            # Check which column name is used (validation_state or validation_label)
+            annotation_col = 'validation_state' if 'validation_state' in annotations.columns else 'validation_label'
+            print(f"DEBUG: Using annotation column: {annotation_col}")
+
+            # Select relevant annotation fields and deduplicate to keep latest status
+            relevant_annotations = annotations.sort("validated_at", descending=True).unique(
+                subset=["prediction_id"], 
+                keep="first"
+            ).select([
+                'prediction_id',
+                pl.col(annotation_col).alias('annotation_status'),
+                pl.col('validated_at').alias('annotation_timestamp')
+            ])
+
+            # Left join to include annotation status for all predictions
+            predictions = predictions.join(
+                relevant_annotations,
+                on='prediction_id',
+                how='left'
+            )
+            print(f"DEBUG: Joined with annotations table")
+        else:
+            # No annotations yet, add null columns
+            predictions = predictions.with_columns([
+                pl.lit(None).alias('annotation_status'),
+                pl.lit(None).alias('annotation_timestamp')
+            ])
+
+        # Get already validated prediction IDs
+        validated_ids = validation_db.validation_annotations_df.filter(
+            (pl.col("strata_id") == strata_id) &
+            (pl.col("species_name") == species_name)
+        )["prediction_id"].to_list()
+        print(f"DEBUG: Found {len(validated_ids)} already validated predictions")
+
+        if review_mode:
+            # Review Mode: Filter FOR validated clips
+            before_filter = len(predictions)
+            predictions = predictions.filter(pl.col("prediction_id").is_in(validated_ids))
+            print(f"DEBUG: Review Mode - After filtering for validated: {len(predictions)} (was {before_filter})")
+            
+            # Sort by timestamp (newest first) for review
+            if "annotation_timestamp" in predictions.columns:
+                predictions = predictions.sort("annotation_timestamp", descending=True)
+        else:
+            # Validation Mode: Filter OUT validated clips
+            if validated_ids:
+                before_filter = len(predictions)
+                predictions = predictions.filter(~pl.col("prediction_id").is_in(validated_ids))
+                print(f"DEBUG: Validation Mode - After excluding validated: {len(predictions)} (was {before_filter})")
+            
+            # Sort by confidence (highest first) for systematic validation
+            predictions = predictions.sort("confidence", descending=True)
+
+        # Debug: Show confidence values of final results
+        if len(predictions) > 0:
+            confidences = predictions["confidence"].to_list()
+            print(f"DEBUG: Final predictions count: {len(predictions)}")
+            print(f"DEBUG: Confidence range: {min(confidences)} to {max(confidences)}")
+            print(f"DEBUG: First 5 confidences: {confidences[:5]}")
+        else:
+            print("DEBUG: No predictions found for validation session!")
+
+        # Get current progress
+        progress_row = validation_db.validation_progress_df.filter(
+            (pl.col("strata_id") == strata_id) &
+            (pl.col("species_name") == species_name)
+        ).row(0, named=True) if len(validation_db.validation_progress_df) > 0 else None
+
+        return {
+            "status": "success",
+            "validation_queue": predictions.to_dicts(),
+            "session_progress": progress_row
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/validation/submit-annotation")
+async def submit_validation_annotation(request: Request):
+    """Submit a validation annotation"""
+    body = await request.json()
+    prediction_id = body.get("prediction_id")
+    validation_state = body.get("validation_state")
+    validation_confidence = body.get("validation_confidence", 3)
+    notes = body.get("notes", "")
+    strata_id = body.get("strata_id")
+    species_name = body.get("species_name")
+
+    if not prediction_id or not validation_state:
+        raise HTTPException(status_code=400, detail="prediction_id and validation_state are required")
+
+    try:
+        if app_state["validation_db"] is None:
+            raise HTTPException(status_code=400, detail="No validation data loaded")
+
+        validation_db = app_state["validation_db"]
+
+        # Get the original prediction
+        prediction = validation_db.predictions_df.filter(
+            pl.col("prediction_id") == prediction_id
+        ).row(0, named=True)
+
+        # Check for existing annotation to handle updates
+        existing_annotation = validation_db.validation_annotations_df.filter(
+            pl.col("prediction_id") == prediction_id
+        )
+        
+        previous_state = None
+        if len(existing_annotation) > 0:
+            # Get previous state for stats update
+            previous_state = existing_annotation["validation_state"][0]
+            print(f"DEBUG: Updating existing annotation. Previous state: {previous_state}")
+            
+            # Remove old annotation
+            validation_db.validation_annotations_df = validation_db.validation_annotations_df.filter(
+                pl.col("prediction_id") != prediction_id
+            )
+
+        # Create new annotation
+        import uuid
+        annotation_id = str(uuid.uuid4())
+        current_time = datetime.now()
+
+        new_annotation = pl.DataFrame({
+            "annotation_id": [annotation_id],
+            "prediction_id": [prediction_id],
+            "filename": [prediction["filename"]],
+            "start_time": [float(prediction["start_time"])],
+            "end_time": [float(prediction["end_time"])],
+            "species_name": [prediction["species_name"]],
+            "original_confidence": [float(prediction["confidence"])],
+            "validation_state": [validation_state],
+            "validation_confidence": [validation_confidence],
+            "annotator_id": ["user"],  # Could be made dynamic
+            "validated_at": [current_time],
+            "strata_id": [prediction["strata_id"]],
+            "notes": [notes]
+        }, schema={
+            "annotation_id": pl.Utf8,
+            "prediction_id": pl.Utf8,
+            "filename": pl.Utf8,
+            "start_time": pl.Float32,
+            "end_time": pl.Float32,
+            "species_name": pl.Utf8,
+            "original_confidence": pl.Float32,
+            "validation_state": pl.Utf8,
+            "validation_confidence": pl.Int32,
+            "annotator_id": pl.Utf8,
+            "validated_at": pl.Datetime,
+            "strata_id": pl.Utf8,
+            "notes": pl.Utf8
+        })
+
+        # Add to annotations database
+        validation_db.validation_annotations_df = pl.concat([
+            validation_db.validation_annotations_df, new_annotation
+        ])
+
+        # Update progress tracking
+        if strata_id and species_name:
+            # Get current progress
+            current_progress = validation_db.validation_progress_df.filter(
+                (pl.col("strata_id") == strata_id) &
+                (pl.col("species_name") == species_name)
+            )
+
+            if len(current_progress) > 0:
+                # Update counts based on validation state
+                updates = {"last_updated": current_time}
+                
+                # First, revert previous state counts if updating
+                if previous_state:
+                    if previous_state == "confirmed":
+                        updates["confirmed_clips"] = current_progress["confirmed_clips"].item() - 1
+                    elif previous_state == "rejected":
+                        updates["rejected_clips"] = current_progress["rejected_clips"].item() - 1
+                    elif previous_state == "uncertain":
+                        updates["uncertain_clips"] = current_progress["uncertain_clips"].item() - 1
+                    elif previous_state == "skipped":
+                        updates["skipped_clips"] = current_progress["skipped_clips"].item() - 1
+                    
+                    updates["validated_clips"] = current_progress["validated_clips"].item() - 1
+                    
+                    # Apply decrements to current_progress reference for the increments below
+                    # (Note: This is a simplified in-memory update for the logic below, 
+                    # actual DB update happens at the end)
+                    for key, val in updates.items():
+                        if key != "last_updated":
+                            # We need to manually update the item in our logic reference
+                            # But since we are building an 'updates' dict, we can just use the values from 'updates'
+                            # if they exist, or fall back to current_progress.
+                            # However, 'updates' accumulates changes.
+                            pass
+
+                # Calculate base values for incrementing (handle if they were just decremented)
+                def get_base_value(key):
+                    if key in updates:
+                        return updates[key]
+                    return current_progress[key].item()
+
+                # Now increment for new state
+                if validation_state == "confirmed":
+                    updates["confirmed_clips"] = get_base_value("confirmed_clips") + 1
+                elif validation_state == "rejected":
+                    updates["rejected_clips"] = get_base_value("rejected_clips") + 1
+                elif validation_state == "uncertain":
+                    updates["uncertain_clips"] = get_base_value("uncertain_clips") + 1
+                elif validation_state == "skipped":
+                    updates["skipped_clips"] = get_base_value("skipped_clips") + 1
+
+                updates["validated_clips"] = get_base_value("validated_clips") + 1
+
+                # Check if target met
+                target_confirmations = current_progress["target_confirmations"].item()
+                target_met = updates.get("confirmed_clips", current_progress["confirmed_clips"].item()) >= target_confirmations
+
+                # Update the progress record
+                mask = (pl.col("strata_id") == strata_id) & (pl.col("species_name") == species_name)
+                for field, value in updates.items():
+                    # Cast integer values to Int32 to match schema
+                    if isinstance(value, int):
+                        lit_value = pl.lit(value, dtype=pl.Int32)
+                    else:
+                        lit_value = pl.lit(value)
+                    validation_db.validation_progress_df = validation_db.validation_progress_df.with_columns(
+                        pl.when(mask).then(lit_value).otherwise(pl.col(field)).alias(field)
+                    )
+
+                # Get updated progress
+                updated_progress = validation_db.validation_progress_df.filter(mask).row(0, named=True)
+
+                # Auto-save after annotation
+                auto_save_success = validation_db.auto_save()
+                if not auto_save_success:
+                    print("WARNING: Auto-save failed - annotations only in memory!")
+                    print(f"WARNING: project_base_path={validation_db.project_base_path}, project_name={validation_db.project_name}")
+
+                return {
+                    "status": "success",
+                    "session_progress": updated_progress,
+                    "target_met": target_met
+                }
+
+        # Auto-save after annotation (even if no progress tracking)
+        validation_db.auto_save()
+
+        return {"status": "success"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/validation/summary")
+async def get_validation_summary():
+    """Get overall validation summary statistics"""
+    try:
+        if app_state["validation_db"] is None:
+            return {
+                "total_strata": 0,
+                "total_species": 0,
+                "total_predictions": 0,
+                "total_annotations": 0,
+                "confirmed_count": 0,
+                "rejected_count": 0,
+                "uncertain_count": 0,
+                "skipped_count": 0,
+                "completion_percentage": 0
+            }
+
+        validation_db = app_state["validation_db"]
+
+        # Calculate summary statistics
+        total_predictions = len(validation_db.predictions_df)
+        total_annotations = len(validation_db.validation_annotations_df)
+        total_strata = validation_db.strata_definitions_df["strata_id"].n_unique()
+        total_species = validation_db.predictions_df["species_name"].n_unique()
+
+        # Count by validation state
+        if total_annotations > 0:
+            validation_counts = validation_db.validation_annotations_df.group_by("validation_state").agg(
+                pl.count().alias("count")
+            ).to_dict(as_series=False)
+
+            state_counts = {
+                state: count
+                for state, count in zip(validation_counts["validation_state"], validation_counts["count"])
+            }
+        else:
+            state_counts = {}
+
+        completion_percentage = (total_annotations / total_predictions * 100) if total_predictions > 0 else 0
+
+        return {
+            "total_strata": total_strata,
+            "total_species": total_species,
+            "total_predictions": total_predictions,
+            "total_annotations": total_annotations,
+            "confirmed_count": state_counts.get("confirmed", 0),
+            "rejected_count": state_counts.get("rejected", 0),
+            "uncertain_count": state_counts.get("uncertain", 0),
+            "skipped_count": state_counts.get("skipped", 0),
+            "completion_percentage": completion_percentage
+        }
+
+    except Exception as e:
+        import traceback
+        print(f"ERROR in validation summary: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/validation/strata-progress")
+async def get_strata_progress():
+    """Get detailed progress for all strata"""
+    try:
+        if app_state["validation_db"] is None:
+            return {"strata_progress": []}
+
+        validation_db = app_state["validation_db"]
+
+        # Join progress data with strata definitions to get confidence_threshold
+        progress_df = validation_db.validation_progress_df.join(
+            validation_db.strata_definitions_df.select(['strata_id', 'confidence_threshold']),
+            on='strata_id',
+            how='left'
+        )
+        progress_data = progress_df.to_dicts()
+
+        # Add completion_status to each record based on target_confirmations
+        for record in progress_data:
+            confirmed = record.get('confirmed_clips', 0)
+            target = record.get('target_confirmations', 1)
+            validated = record.get('validated_clips', 0)
+            total = record.get('total_clips', 0)
+
+            # If no clips above threshold, mark as target_met (nothing to validate)
+            if total == 0:
+                record['completion_status'] = 'target_met'
+            elif confirmed >= target:
+                record['completion_status'] = 'target_met'
+            elif validated > 0:
+                record['completion_status'] = 'in_progress'
+            else:
+                record['completion_status'] = 'not_started'
+
+        return {"strata_progress": progress_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/validation/annotations")
+async def get_validation_annotations(
+    strata_id: Optional[str] = None,
+    species_name: Optional[str] = None,
+    page: int = 1,
+    limit: int = 20,
+    sort_field: str = "validated_at",
+    sort_direction: str = "desc"
+):
+    """Get detailed validation annotations with filtering and pagination"""
+    try:
+        if app_state["validation_db"] is None:
+            return {"annotations": [], "total_count": 0}
+
+        validation_db = app_state["validation_db"]
+
+        # Join annotations with predictions to get confidence scores
+        annotations = validation_db.validation_annotations_df
+        predictions = validation_db.predictions_df
+        strata_defs = validation_db.strata_definitions_df
+
+        # Join on prediction_id to get original confidence
+        joined = annotations.join(
+            predictions.select(['prediction_id', 'confidence']),
+            on='prediction_id',
+            how='left'
+        )
+
+        # Join with strata definitions to get strata name
+        if len(strata_defs) > 0:
+            joined = joined.join(
+                strata_defs.select(['strata_id', 'strata_name']),
+                on='strata_id',
+                how='left'
+            )
+
+        # Apply filters
+        if strata_id:
+            joined = joined.filter(pl.col("strata_id") == strata_id)
+        if species_name:
+            joined = joined.filter(pl.col("species_name") == species_name)
+
+        total_count = len(joined)
+
+        # Apply sorting - validate sort field exists
+        if sort_field in joined.columns:
+            descending = sort_direction == "desc"
+            joined = joined.sort(sort_field, descending=descending)
+        else:
+            # Default to validated_at if sort field doesn't exist
+            print(f"WARNING: Sort field '{sort_field}' not found in columns: {joined.columns}")
+            if 'validated_at' in joined.columns:
+                joined = joined.sort('validated_at', descending=True)
+
+        # Apply pagination
+        offset = (page - 1) * limit
+        joined = joined.slice(offset, limit)
+
+        # Debug: Check what columns we have
+        print(f"DEBUG: Joined columns: {joined.columns}")
+        if len(joined) > 0:
+            print(f"DEBUG: First row sample: {joined.head(1).to_dicts()}")
+
+        # Convert to dicts and rename fields for frontend compatibility
+        result_annotations = []
+        for row in joined.to_dicts():
+            # Check if validation_state already exists (from loaded project),
+            # otherwise fall back to validation_label (from new annotations)
+            if 'validation_state' not in row and 'validation_label' in row:
+                row['validation_state'] = row['validation_label']
+            elif 'validation_state' not in row:
+                row['validation_state'] = 'unknown'
+
+            # Set original_confidence if not already present
+            if 'original_confidence' not in row and 'confidence' in row:
+                row['original_confidence'] = row['confidence']
+
+            result_annotations.append(row)
+
+        return {
+            "annotations": result_annotations,
+            "total_count": total_count,
+            "page": page,
+            "limit": limit
+        }
+
+    except Exception as e:
+        print(f"ERROR in get_validation_annotations: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/validation/export/{format}")
+async def export_validation_results(
+    format: str,
+    strata_id: Optional[str] = None,
+    species_name: Optional[str] = None
+):
+    """Export validation results in specified format"""
+    try:
+        if app_state["validation_db"] is None:
+            raise HTTPException(status_code=400, detail="No validation data available")
+
+        validation_db = app_state["validation_db"]
+
+        if format.lower() == "csv":
+            # Export annotations as CSV
+            annotations = validation_db.validation_annotations_df
+
+            # Apply filters
+            if strata_id:
+                annotations = annotations.filter(pl.col("strata_id") == strata_id)
+            if species_name:
+                annotations = annotations.filter(pl.col("species_name") == species_name)
+
+            # Convert to CSV
+            import io
+            csv_buffer = io.StringIO()
+            annotations.write_csv(csv_buffer)
+
+            from fastapi.responses import StreamingResponse
+            return StreamingResponse(
+                io.BytesIO(csv_buffer.getvalue().encode()),
+                media_type="text/csv",
+                headers={"Content-Disposition": "attachment; filename=validation_results.csv"}
+            )
+
+        elif format.lower() == "json":
+            # Export as JSON
+            annotations = validation_db.validation_annotations_df
+
+            # Apply filters
+            if strata_id:
+                annotations = annotations.filter(pl.col("strata_id") == strata_id)
+            if species_name:
+                annotations = annotations.filter(pl.col("species_name") == species_name)
+
+            import io
+            json_data = annotations.to_dicts()
+
+            from fastapi.responses import StreamingResponse
+            return StreamingResponse(
+                io.BytesIO(json.dumps(json_data, indent=2, default=str).encode()),
+                media_type="application/json",
+                headers={"Content-Disposition": "attachment; filename=validation_results.json"}
+            )
+
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported export format")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ===== VALIDATION PROJECT PERSISTENCE =====
+
+@app.post("/api/validation/save-project")
+async def save_validation_project(request: Request):
+    """Save validation project to disk for later loading"""
+    try:
+        body = await request.json()
+    except:
+        body = {}
+
+    base_path = body.get("base_path")
+    project_name = body.get("project_name")
+
+    try:
+        if app_state["validation_db"] is None:
+            raise HTTPException(status_code=400, detail="No validation data to save")
+
+        validation_db = app_state["validation_db"]
+
+        # Use stored project path if no path provided (for auto-save)
+        if not base_path:
+            if validation_db.project_base_path:
+                base_path = validation_db.project_base_path
+                project_name = validation_db.project_name
+            else:
+                # Default to current working directory
+                base_path = "."
+
+        result = validation_db.save_validation_database(base_path, project_name)
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/validation/load-project")
+async def load_validation_project(request: Request):
+    """Load validation project from disk"""
+    body = await request.json()
+    project_path = body.get("project_path")
+
+    if not project_path:
+        raise HTTPException(status_code=400, detail="project_path is required")
+
+    try:
+        # Initialize new validation database if needed
+        if app_state["validation_db"] is None:
+            from modules.validation_db import ValidationDB
+            app_state["validation_db"] = ValidationDB()
+
+        validation_db = app_state["validation_db"]
+        result = validation_db.load_validation_database(project_path)
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/validation/list-projects")
+async def list_validation_projects(base_path: str):
+    """List available validation projects in a directory"""
+    if not base_path:
+        raise HTTPException(status_code=400, detail="base_path is required")
+
+    try:
+        from modules.validation_db import ValidationDB
+        temp_db = ValidationDB()  # Create temporary instance for listing
+        result = temp_db.list_validation_projects(base_path)
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/validation/diagnostic")
+async def validation_diagnostic():
+    """Diagnostic endpoint to check validation database contents"""
+    try:
+        if app_state["validation_db"] is None:
+            return {
+                "status": "error",
+                "message": "No validation database loaded"
+            }
+
+        validation_db = app_state["validation_db"]
+
+        # Get basic counts
+        total_predictions = len(validation_db.predictions_df)
+        total_annotations = len(validation_db.validation_annotations_df)
+        total_strata = len(validation_db.strata_definitions_df)
+
+        # Get unique values
+        unique_strata_ids = validation_db.predictions_df["strata_id"].unique().to_list() if total_predictions > 0 else []
+        unique_species = validation_db.predictions_df["species_name"].unique().to_list() if total_predictions > 0 else []
+
+        # Get strata details
+        strata_details = []
+        for strata_row in validation_db.strata_definitions_df.iter_rows(named=True):
+            strata_id = strata_row['strata_id']
+            strata_name = strata_row['strata_name']
+
+            # Count predictions for this strata
+            strata_preds = validation_db.predictions_df.filter(
+                validation_db.predictions_df['strata_id'] == strata_id
+            )
+
+            # Get species in this strata
+            species_in_strata = {}
+            for species in unique_species:
+                species_preds = strata_preds.filter(
+                    strata_preds['species_name'] == species
+                )
+                if len(species_preds) > 0:
+                    confidences = species_preds['confidence'].to_list()
+                    species_in_strata[species] = {
+                        'total_clips': len(species_preds),
+                        'min_confidence': float(min(confidences)),
+                        'max_confidence': float(max(confidences)),
+                        'avg_confidence': float(sum(confidences) / len(confidences))
+                    }
+
+            strata_details.append({
+                'strata_id': strata_id,
+                'strata_name': strata_name,
+                'total_predictions': len(strata_preds),
+                'species': species_in_strata
+            })
+
+        return {
+            "status": "success",
+            "total_predictions": total_predictions,
+            "total_annotations": total_annotations,
+            "total_strata": total_strata,
+            "unique_strata_ids": unique_strata_ids[:10],  # First 10
+            "unique_species": unique_species[:20],  # First 20
+            "strata_details": strata_details
+        }
+
+    except Exception as e:
+        import traceback
+        return {
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+@app.get("/api/validation/audio/{file_path:path}")
+def get_validation_audio_clip(file_path: str, clip_start: float = None, clip_end: float = None):
+    """Get audio clip for validation interface with disk caching for extracted clips"""
+    from urllib.parse import unquote
+    from pathlib import Path
+    import soundfile as sf
+    import io
+    import hashlib
+    import os
+    from fastapi.responses import StreamingResponse, FileResponse
+
+    # Cache directory setup
+    CACHE_DIR = Path("/tmp/bioacoustic_audio_cache")
+    MAX_CACHE_SIZE_GB = 2
+    MAX_CACHE_SIZE_BYTES = MAX_CACHE_SIZE_GB * 1024 * 1024 * 1024
+
+    def get_cache_key(file_path: str, start: float, end: float) -> str:
+        """Generate unique cache key for a clip"""
+        cache_string = f"{file_path}_{start}_{end}"
+        return hashlib.md5(cache_string.encode()).hexdigest() + ".wav"
+
+    def get_cache_size() -> int:
+        """Get total size of cache directory in bytes"""
+        total_size = 0
+        if CACHE_DIR.exists():
+            for file in CACHE_DIR.iterdir():
+                if file.is_file():
+                    total_size += file.stat().st_size
+        return total_size
+
+    def cleanup_old_cache_files():
+        """Remove oldest cache files if cache exceeds size limit"""
+        if not CACHE_DIR.exists():
+            return
+
+        current_size = get_cache_size()
+        if current_size <= MAX_CACHE_SIZE_BYTES:
+            return
+
+        # Get all cache files sorted by access time (oldest first)
+        cache_files = [(f, f.stat().st_atime) for f in CACHE_DIR.iterdir() if f.is_file()]
+        cache_files.sort(key=lambda x: x[1])
+
+        # Remove oldest files until under limit
+        for file_path, _ in cache_files:
+            if current_size <= MAX_CACHE_SIZE_BYTES * 0.8:  # Keep at 80% to avoid frequent cleanup
+                break
+            try:
+                file_size = file_path.stat().st_size
+                file_path.unlink()
+                current_size -= file_size
+                print(f"Cache cleanup: Removed {file_path.name} ({file_size / 1024 / 1024:.2f} MB)")
+            except Exception as e:
+                print(f"Cache cleanup error: {e}")
+
+    try:
+        # Decode URL-encoded file path
+        decoded_path = unquote(file_path)
+
+        # Add leading slash if missing (FastAPI strips it from path parameters)
+        if not decoded_path.startswith('/'):
+            decoded_path = '/' + decoded_path
+
+        # Check if file exists
+        if not Path(decoded_path).exists():
+            raise HTTPException(status_code=404, detail=f"Audio file not found: {decoded_path}")
+
+        # Optimization: If no specific clip range is requested, OR if we want to rely on browser seeking,
+        # serve the file directly using FileResponse. This enables Range requests (efficient seeking),
+        # OS-level caching, and avoids expensive decoding/encoding in Python.
+        if clip_start is None and clip_end is None:
+            return FileResponse(
+                decoded_path,
+                media_type="audio/wav",
+                headers={
+                    "Cache-Control": "public, max-age=31536000, immutable",
+                    "Accept-Ranges": "bytes"
+                }
+            )
+
+        # Legacy/Specific Clip Logic: If specific start/end times are requested via query params,
+        # we extract that specific segment with disk caching for performance.
+
+        # Create cache directory if it doesn't exist
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Check cache first
+        cache_key = get_cache_key(decoded_path, clip_start, clip_end)
+        cache_file_path = CACHE_DIR / cache_key
+
+        if cache_file_path.exists():
+            # Serve from cache (instant!)
+            print(f"Cache HIT: Serving {cache_key} from cache")
+            # Update access time for LRU cleanup
+            cache_file_path.touch()
+            return FileResponse(
+                cache_file_path,
+                media_type="audio/wav",
+                headers={
+                    "Content-Disposition": "inline; filename=clip.wav",
+                    "Cache-Control": "public, max-age=31536000, immutable"
+                }
+            )
+
+        # Cache MISS: Extract clip from source file
+        print(f"Cache MISS: Extracting clip from {decoded_path} ({clip_start}-{clip_end}s)")
+
+        # Efficiently read and process audio
+        with sf.SoundFile(decoded_path) as f:
+            original_sr = f.samplerate
+
+            start_frame = int(clip_start * original_sr)
+            end_frame = int(clip_end * original_sr)
+            # Ensure we don't seek past end
+            if start_frame < f.frames:
+                f.seek(start_frame)
+                frames_to_read = min(end_frame - start_frame, f.frames - start_frame)
+                audio = f.read(frames_to_read)
+            else:
+                audio = np.array([])
+
+        # Save to cache file
+        try:
+            sf.write(cache_file_path, audio, original_sr, format='WAV')
+            print(f"Cache SAVE: Saved {cache_key} ({cache_file_path.stat().st_size / 1024:.2f} KB)")
+
+            # Cleanup old cache if needed
+            cleanup_old_cache_files()
+        except Exception as e:
+            print(f"Cache save error (non-fatal): {e}")
+
+        # Serve the cached file
+        return FileResponse(
+            cache_file_path,
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": "inline; filename=clip.wav",
+                "Cache-Control": "public, max-age=31536000, immutable"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR: Failed to serve audio: {str(e)}")
+        import traceback
+        print(f"ERROR: Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to serve audio: {str(e)}")
+
+@app.get("/api/validation/cache/stats")
+def get_cache_stats():
+    """Get audio cache statistics"""
+    from pathlib import Path
+
+    CACHE_DIR = Path("/tmp/bioacoustic_audio_cache")
+
+    try:
+        if not CACHE_DIR.exists():
+            return {
+                "status": "success",
+                "cache_enabled": True,
+                "cache_size_bytes": 0,
+                "cache_size_mb": 0,
+                "file_count": 0,
+                "max_size_gb": 2
+            }
+
+        # Count files and calculate total size
+        total_size = 0
+        file_count = 0
+        for file in CACHE_DIR.iterdir():
+            if file.is_file():
+                total_size += file.stat().st_size
+                file_count += 1
+
+        return {
+            "status": "success",
+            "cache_enabled": True,
+            "cache_size_bytes": total_size,
+            "cache_size_mb": round(total_size / (1024 * 1024), 2),
+            "file_count": file_count,
+            "max_size_gb": 2
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+@app.post("/api/validation/cache/clear")
+def clear_cache():
+    """Clear the audio cache"""
+    from pathlib import Path
+    import shutil
+
+    CACHE_DIR = Path("/tmp/bioacoustic_audio_cache")
+
+    try:
+        if not CACHE_DIR.exists():
+            return {
+                "status": "success",
+                "message": "Cache directory does not exist (already empty)"
+            }
+
+        # Get stats before clearing
+        file_count = len(list(CACHE_DIR.iterdir()))
+        total_size = sum(f.stat().st_size for f in CACHE_DIR.iterdir() if f.is_file())
+
+        # Remove all cache files
+        shutil.rmtree(CACHE_DIR)
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+        return {
+            "status": "success",
+            "message": f"Cache cleared: {file_count} files ({total_size / (1024 * 1024):.2f} MB) removed"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
 if __name__ == "__main__":
     import uvicorn
+    import subprocess
+    import signal
+
+    # Clean up any existing process on port 8000
+    try:
+        result = subprocess.run(['lsof', '-ti:8000'], capture_output=True, text=True)
+        if result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+            for pid in pids:
+                if pid:
+                    print(f"INFO: Killing existing process {pid} on port 8000")
+                    os.kill(int(pid), signal.SIGKILL)
+                    time.sleep(0.5)  # Give it a moment to release the port
+    except Exception as e:
+        print(f"INFO: Port cleanup check: {e}")
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

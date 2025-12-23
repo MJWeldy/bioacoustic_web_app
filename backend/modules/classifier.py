@@ -184,6 +184,12 @@ def fit_w_tape(
     label_strength=None,
     eval_label_strength=None,
     weak_neg_weight=0.05,
+    enable_early_stopping=True,
+    enable_lr_reduction=True,
+    lr_redux=0.5,
+    patience=5000,
+    lr_reduce_patience=1000,
+    metric_for_tracking='cmap',
 ):
     # embeddings = np.array(X_train).squeeze()
     # labels = np.array(y_train)
@@ -242,7 +248,8 @@ def fit_w_tape(
         val_loss = bce_loss(y, logits, eval_mask, weak_neg_weight)
         preds = tf.sigmoid(np.array(logits))
         cmaps = cmap(y, np.array(preds), 0)
-        return val_loss, cmaps
+        aucs = get_AUC(y, np.array(preds), 0)
+        return val_loss, cmaps, aucs
 
     # Prepare evaluation mask
     if eval_label_strength is not None:
@@ -254,32 +261,54 @@ def fit_w_tape(
     train_losses = []
     val_losses = []
     cmaps = []
+    aucs = []
+    geomeans = []
     best_val_loss = 1000.0
-    best = 0.0
-    patience = 5000
+    best = 0.0 if metric_for_tracking != 'loss' else 1000.0
+    # Early stopping and LR reduction counters
     lr_wait = 0
     wait = 0
-    lr_reduce_patience = 1000
-    lr_redux = 0.5  # 0.9
     for step, (x_batch_train, y_batch_train, mask_batch_train) in enumerate(ds):
         if step == N_STEPS:
             break
         loss_value = train_step(tf.squeeze(x_batch_train), y_batch_train, mask_batch_train)
         train_losses.append(loss_value)
-        val_loss, score = test_step(eval_embeddings, eval_labels, eval_mask)
+        val_loss, cmap_score, auc_score = test_step(eval_embeddings, eval_labels, eval_mask)
         val_losses.append(val_loss)
-        cmaps.append(score["macro"])
-        # print(score["macro"])
+        cmaps.append(cmap_score["macro"])
+        aucs.append(auc_score["macro"])
+
+        # Calculate geometric mean of AUC and cMAP
+        geomean = np.sqrt(auc_score["macro"] * cmap_score["macro"])
+        geomeans.append(geomean)
+
+        # Select the metric to use for tracking based on parameter
+        if metric_for_tracking == 'auc':
+            current_score = auc_score["macro"]
+            metric_name = "Macro AUC"
+            is_better = current_score > best
+        elif metric_for_tracking == 'geomean':
+            current_score = geomean
+            metric_name = "Geometric Mean (AUC × cMAP)"
+            is_better = current_score > best
+        elif metric_for_tracking == 'loss':
+            current_score = float(val_loss)
+            metric_name = "Test Data Loss"
+            is_better = current_score < best
+        else:  # default to 'cmap'
+            current_score = cmap_score["macro"]
+            metric_name = "Macro cMAP"
+            is_better = current_score > best
 
         # implementing early stopping
         # Saving checkpoints
-        if step > 0 and score["macro"] > best:
+        if step > 0 and is_better:
             if verbose:
                 print(
-                    f'Macro cMAP of best fit {score["macro"]} obtained on step: {step} val loss: {val_loss}'
+                    f'{metric_name} of best fit {current_score:.4f} obtained on step: {step} val loss: {val_loss}'
                 )
-            best = score["macro"]
-            score_indiv = score["individual"]
+            best = current_score
+            score_indiv = cmap_score["individual"]
             # Ensure the directory exists before saving
             import os
             from pathlib import Path
@@ -287,27 +316,41 @@ def fit_w_tape(
             os.makedirs(save_dir, exist_ok=True)
             classifier_model.save(save_path)
             #classifier_model.save(f"./checkpoints/{save_name}.h5py")
-        # Early stopping
-        wait += 1
-        # Reduce learning rate
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            wait = 0
-            lr_wait = 0
-        else:
-            lr_wait += 1
-            if lr_wait >= lr_reduce_patience:
-                if verbose:
-                    print(
-                        f"Reducing learning rate: from {learning_rate} to {learning_rate*lr_redux} on step {step}"  # learning_rate*0.9
-                    )
-                learning_rate = learning_rate * lr_redux
-                optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-                lr_wait = 0
-        if wait >= patience or learning_rate < 0.00001:
+
+        # Early stopping and learning rate reduction logic (optional)
+        if enable_early_stopping or enable_lr_reduction:
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                if enable_early_stopping:
+                    wait = 0
+                if enable_lr_reduction:
+                    lr_wait = 0
+            else:
+                if enable_early_stopping:
+                    wait += 1
+                if enable_lr_reduction:
+                    lr_wait += 1
+                    if lr_wait >= lr_reduce_patience:
+                        if verbose:
+                            print(
+                                f"Reducing learning rate: from {learning_rate} to {learning_rate*lr_redux} on step {step}"
+                            )
+                        learning_rate = learning_rate * lr_redux
+                        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+                        lr_wait = 0
+
+        # Check early stopping condition
+        if enable_early_stopping and (wait >= patience or learning_rate < 0.00001):
+            if verbose:
+                print(f"Early stopping triggered at step {step}")
             break
     print(f"Final loss: {loss_value}")
-    print(
-        f"Macro cMAP of best fit {best}"  # obtained on step: {step} val loss: {val_loss}'
-    )
-    return classifier_model, train_losses, val_losses, cmaps
+    if metric_for_tracking == 'auc':
+        print(f"Macro AUC of best fit: {best:.4f}")
+    elif metric_for_tracking == 'geomean':
+        print(f"Geometric Mean of best fit: {best:.4f}")
+    elif metric_for_tracking == 'loss':
+        print(f"Test Data Loss of best fit: {best:.4f}")
+    else:
+        print(f"Macro cMAP of best fit: {best:.4f}")
+    return classifier_model, train_losses, val_losses, cmaps, aucs, geomeans

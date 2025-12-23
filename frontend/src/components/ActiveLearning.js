@@ -23,6 +23,7 @@ const ActiveLearning = ({ isActive = true }) => {
   const [clipLabels, setClipLabels] = useState(null);
   const [reviewMode, setReviewMode] = useState('random');
   const [additionalPositiveClasses, setAdditionalPositiveClasses] = useState([]);
+  const [roundProgress, setRoundProgress] = useState(null);
   const audioRef = useRef(null);
 
   const colorModeOptions = [
@@ -36,6 +37,7 @@ const ActiveLearning = ({ isActive = true }) => {
     { value: 'random', label: 'Random' },
     { value: 'top_down', label: 'Top-down (Highest Score First)' },
     { value: 'top_10+score_quantiles', label: 'Top 10+Score Quantiles (50 clips/round)' },
+    { value: 'review_annotated', label: 'Review Annotated Clips' },
   ];
 
   const loadAvailableClasses = async () => {
@@ -269,15 +271,23 @@ const ActiveLearning = ({ isActive = true }) => {
     if (!isDatasetLoaded) return;
 
     try {
-      const filterConfig = {
-        score_min: scoreRange[0],
-        score_max: scoreRange[1],
-        annotation_filter: [4] // Only unreviewed clips
-      };
+      let response;
 
-      const response = await axios.post('/api/active-learning/get-clips', filterConfig);
+      if (reviewMode === 'review_annotated') {
+        // In review mode, get annotated clips
+        response = await axios.post('/api/active-learning/review-clips');
+      } else {
+        // In annotation mode, get unreviewed clips
+        const filterConfig = {
+          score_min: scoreRange[0],
+          score_max: scoreRange[1],
+          annotation_filter: [4] // Only unreviewed clips
+        };
+        response = await axios.post('/api/active-learning/get-clips', filterConfig);
+      }
+
       setClips(response.data.clips);
-      
+
       // Use the next clip from the API if available, otherwise use the first clip
       if (response.data.next_clip) {
         setCurrentClip(response.data.next_clip);
@@ -288,24 +298,50 @@ const ActiveLearning = ({ isActive = true }) => {
       } else {
         // Don't set currentClip to null immediately - let user know but keep current clip visible
         console.log('DEBUG: No more clips available with current filters');
-        toast.info('No more clips match the current filters. You can adjust the score range or annotation filters to see more clips.');
+        const message = reviewMode === 'review_annotated'
+          ? 'No annotated clips found for the current class.'
+          : 'No more clips match the current filters. You can adjust the score range or annotation filters to see more clips.';
+        toast.info(message);
         // Keep the current clip displayed so user can still see what they just annotated
       }
     } catch (error) {
-      toast.error('Failed to load clips');
+      const message = reviewMode === 'review_annotated'
+        ? 'Failed to load annotated clips for review'
+        : 'Failed to load clips';
+      toast.error(message);
     }
   };
 
   const loadClip = async (clip) => {
     console.log('DEBUG: Loading clip with data:', clip);
-    
+
+    // Safety check: ensure clip is defined
+    if (!clip) {
+      console.error('ERROR: loadClip called with undefined clip');
+      toast.error('No clip data available');
+      return;
+    }
+
     // Ensure clip has clip_id property - construct it if missing
     if (!clip.clip_id && clip.file_path && clip.clip_start !== undefined && clip.clip_end !== undefined) {
       clip.clip_id = `${clip.file_path}|${clip.clip_start}|${clip.clip_end}`;
       console.log('DEBUG: Constructed clip_id:', clip.clip_id);
     }
-    
+
     setCurrentClip(clip);
+
+    // Extract round progress metadata if available
+    if (clip.round_position && clip.round_total) {
+      setRoundProgress({
+        position: clip.round_position,
+        total: clip.round_total,
+        category: clip.round_category,
+        categoryLabel: clip.round_category_label
+      });
+    } else {
+      setRoundProgress(null);
+    }
+
     setIsLoading(true);
 
     try {
@@ -376,10 +412,25 @@ const ActiveLearning = ({ isActive = true }) => {
   };
 
   const nextClip = async () => {
-    if (currentClipIndex < clips.length - 1) {
+    // Safety check: ensure clips array is not empty
+    if (!clips || clips.length === 0) {
+      toast.error('No clips available');
+      return;
+    }
+
+    // For quantile mode, cycle through the round
+    if (reviewMode === 'top_10+score_quantiles' && clips.length > 0) {
+      const newIndex = (currentClipIndex + 1) % clips.length; // Cycle back to 0 after last clip
+      setCurrentClipIndex(newIndex);
+      if (clips[newIndex]) {
+        await loadClip(clips[newIndex]);
+      }
+    } else if (currentClipIndex < clips.length - 1) {
       const newIndex = currentClipIndex + 1;
       setCurrentClipIndex(newIndex);
-      await loadClip(clips[newIndex]);
+      if (clips[newIndex]) {
+        await loadClip(clips[newIndex]);
+      }
     } else {
       // For review modes that have a specific order, refresh to get the next clip
       await getClips();
@@ -387,10 +438,73 @@ const ActiveLearning = ({ isActive = true }) => {
   };
 
   const previousClip = async () => {
+    // Safety check: ensure clips array is not empty
+    if (!clips || clips.length === 0) {
+      toast.error('No clips available');
+      return;
+    }
+
+    // For quantile mode, cycle backwards through the round
+    if (reviewMode === 'top_10+score_quantiles' && clips.length > 0) {
+      const newIndex = currentClipIndex === 0 ? clips.length - 1 : currentClipIndex - 1;
+      setCurrentClipIndex(newIndex);
+      if (clips[newIndex]) {
+        await loadClip(clips[newIndex]);
+      }
+      return;
+    }
+
     if (currentClipIndex > 0) {
       const newIndex = currentClipIndex - 1;
       setCurrentClipIndex(newIndex);
-      await loadClip(clips[newIndex]);
+      if (clips[newIndex]) {
+        await loadClip(clips[newIndex]);
+      }
+    }
+  };
+
+  const generateNewRound = async () => {
+    if (reviewMode !== 'top_10+score_quantiles') return;
+
+    try {
+      setIsLoading(true);
+      await getClips(); // This will generate a new round
+      toast.success('Generated new round of 50 clips');
+    } catch (error) {
+      toast.error('Failed to generate new round');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const deleteAnnotation = async () => {
+    if (!currentClip || !currentClip.clip_id) {
+      toast.error('No clip selected');
+      return;
+    }
+
+    if (!window.confirm('Are you sure you want to delete this annotation for the current class?')) {
+      return;
+    }
+
+    try {
+      await axios.delete('/api/active-learning/annotation', {
+        params: {
+          clip_id: currentClip.clip_id
+        }
+      });
+
+      toast.success('Annotation deleted');
+
+      // Update label statistics and clip labels
+      await loadLabelStatistics();
+      await loadClipLabels(currentClip.clip_id);
+
+      // Move to next clip in review mode
+      await nextClip();
+    } catch (error) {
+      const message = error.response?.data?.detail || 'Failed to delete annotation';
+      toast.error(message);
     }
   };
 
@@ -405,23 +519,88 @@ const ActiveLearning = ({ isActive = true }) => {
     }
   };
 
+  const saveSpectrogram = () => {
+    if (!spectrogram || !currentClip) {
+      toast.error('No spectrogram available to save');
+      return;
+    }
+
+    try {
+      // Create a link element to download the image
+      const link = document.createElement('a');
+      link.href = spectrogram;
+
+      // Create a filename from the clip info
+      const fileName = currentClip.file_name.replace(/\.[^/.]+$/, ''); // Remove extension
+      const startTime = currentClip.clip_start.toFixed(2);
+      const endTime = currentClip.clip_end.toFixed(2);
+      link.download = `${fileName}_${startTime}-${endTime}_spectrogram.png`;
+
+      // Trigger download
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      toast.success('Spectrogram saved successfully');
+    } catch (error) {
+      toast.error('Failed to save spectrogram');
+    }
+  };
+
   const exportClips = async () => {
     const exportPath = prompt('Enter export path:');
-    
+
     if (!exportPath) return;
 
     try {
+      // Check if folder has existing clips
+      const checkResponse = await axios.get('/api/active-learning/check-export-folder', {
+        params: { export_path: exportPath }
+      });
+
+      // Show confirmation dialog if folder has existing clips
+      if (checkResponse.data.existing_clips_count > 0) {
+        const confirmMsg = `⚠️ The export folder contains ${checkResponse.data.existing_clips_count} existing clips.\n\n` +
+          `This export will intelligently:\n` +
+          `• Skip clips with unchanged labels\n` +
+          `• Update filenames for clips with changed labels\n` +
+          `• Add new annotated clips\n\n` +
+          `Do you want to continue?`;
+
+        if (!window.confirm(confirmMsg)) {
+          return;
+        }
+      }
+
+      // Proceed with export
       const response = await axios.post('/api/active-learning/export-clips', null, {
-        params: { 
+        params: {
           export_path: exportPath
         }
       });
-      
+
       if (response.data.status === 'success') {
-        toast.success(response.data.message);
+        const stats = response.data;
+
+        // Build detailed success message
+        let message = response.data.message;
+
+        // Show detailed stats in toast
+        if (stats.clips_new > 0 || stats.clips_updated > 0 || stats.clips_skipped > 0) {
+          const details = [];
+          if (stats.clips_new > 0) details.push(`${stats.clips_new} new`);
+          if (stats.clips_updated > 0) details.push(`${stats.clips_updated} updated`);
+          if (stats.clips_skipped > 0) details.push(`${stats.clips_skipped} skipped`);
+
+          message += `\n\nDetails: ${details.join(', ')}`;
+          message += `\nTotal: ${stats.total_clips} clips (${stats.positive_clips} positive, ${stats.negative_clips} negative, ${stats.uncertain_clips} uncertain)`;
+        }
+
+        toast.success(message, { autoClose: 8000 });
       }
     } catch (error) {
-      toast.error('Failed to export clips');
+      const errorMsg = error.response?.data?.detail || 'Failed to export clips';
+      toast.error(errorMsg);
     }
   };
 
@@ -537,7 +716,7 @@ const ActiveLearning = ({ isActive = true }) => {
               }}
             />
             <small style={{ color: '#666', fontSize: '0.875rem' }}>
-              Select how clips should be presented for annotation. Top-down shows highest scores first. Top 10+Score Quantiles presents 50 clips per round: top 10 highest scoring + 10 clips from each of 4 score ranges (0-0.5, 0.5-0.75, 0.75-0.875, 0.875-1.0).
+              Select how clips should be presented. <strong>Random/Top-down/Quantiles:</strong> For annotating new clips. <strong>Review Annotated Clips:</strong> For reviewing/editing/deleting existing annotations (shows a Delete button).
             </small>
           </div>
         )}
@@ -647,19 +826,53 @@ const ActiveLearning = ({ isActive = true }) => {
         )}
 
         {isDatasetLoaded && datasetMetadata && (
-          <div style={{ 
-            padding: '1rem', 
-            backgroundColor: '#f8f9fa', 
+          <div style={{
+            padding: '0.5rem 0.75rem',
+            backgroundColor: '#f8f9fa',
             borderRadius: '6px',
             marginTop: '1rem',
-            border: '1px solid #e89c81'
+            border: '1px solid #e89c81',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '1.5rem',
+            flexWrap: 'wrap',
+            fontSize: '0.85rem'
           }}>
-            <strong style={{ color: '#6e7cb9' }}>Dataset Information:</strong>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', marginTop: '0.5rem', fontSize: '0.9rem' }}>
-              <div><strong>Type:</strong> {datasetMetadata.dataset_info?.dataset_type || 'Unknown'}</div>
-              <div><strong>Model:</strong> {datasetMetadata.dataset_info?.backend_model || 'Unknown'}</div>
-              <div><strong>Created:</strong> {datasetMetadata.dataset_info?.creation_date ? new Date(datasetMetadata.dataset_info.creation_date).toLocaleDateString() : 'Unknown'}</div>
-              <div><strong>Classes:</strong> {Object.keys(datasetMetadata.class_map || {}).join(', ')}</div>
+            <span style={{ color: '#6e7cb9', fontWeight: 'bold' }}>Dataset:</span>
+            <span><strong>Type:</strong> {datasetMetadata.dataset_info?.dataset_type || 'Unknown'}</span>
+            <span><strong>Model:</strong> {datasetMetadata.dataset_info?.backend_model || 'Unknown'}</span>
+            <span><strong>Created:</strong> {datasetMetadata.dataset_info?.creation_date ? new Date(datasetMetadata.dataset_info.creation_date).toLocaleDateString() : 'Unknown'}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <strong>Classes ({Object.keys(datasetMetadata.class_map || {}).length}):</strong>
+              <Select
+                options={Object.keys(datasetMetadata.class_map || {}).map(cls => ({ value: cls, label: cls }))}
+                placeholder="View classes..."
+                isSearchable={false}
+                isClearable={true}
+                styles={{
+                  control: (base) => ({
+                    ...base,
+                    minHeight: '28px',
+                    fontSize: '0.8rem',
+                    minWidth: '150px',
+                    border: '1px solid #d1d5db',
+                    boxShadow: 'none',
+                    '&:hover': { border: '1px solid #9ca3af' }
+                  }),
+                  indicatorsContainer: (base) => ({
+                    ...base,
+                    height: '28px'
+                  }),
+                  valueContainer: (base) => ({
+                    ...base,
+                    padding: '0 6px'
+                  }),
+                  menu: (base) => ({
+                    ...base,
+                    fontSize: '0.8rem'
+                  })
+                }}
+              />
             </div>
           </div>
         )}
@@ -668,12 +881,56 @@ const ActiveLearning = ({ isActive = true }) => {
       {currentClip && (
         <div className="card">
           <div className="card-header">
-            <h3>Current Clip</h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.5rem' }}>
+              <h3 style={{ margin: 0 }}>Current Clip</h3>
+              {roundProgress && reviewMode === 'top_10+score_quantiles' && (
+                <div style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'flex-end',
+                  gap: '0.5rem'
+                }}>
+                  <div style={{
+                    padding: '0.5rem 1rem',
+                    backgroundColor: roundProgress.category === 'top_10' ? '#d1fae5' : '#dbeafe',
+                    border: roundProgress.category === 'top_10' ? '2px solid #10b981' : '2px solid #3b82f6',
+                    borderRadius: '8px',
+                    fontSize: '0.85rem',
+                    fontWeight: 'bold',
+                    color: roundProgress.category === 'top_10' ? '#059669' : '#1e40af'
+                  }}>
+                    {roundProgress.categoryLabel}
+                  </div>
+                  <div style={{
+                    padding: '0.25rem 0.75rem',
+                    backgroundColor: '#f3f4f6',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '6px',
+                    fontSize: '0.8rem',
+                    color: '#4b5563'
+                  }}>
+                    Round Progress: <strong>{roundProgress.position} / {roundProgress.total}</strong>
+                  </div>
+                  <button
+                    onClick={generateNewRound}
+                    disabled={isLoading}
+                    className="btn btn-primary"
+                    style={{
+                      fontSize: '0.8rem',
+                      padding: '0.4rem 0.8rem',
+                      minWidth: '140px'
+                    }}
+                  >
+                    Generate New Round
+                  </button>
+                </div>
+              )}
+            </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <p style={{ margin: 0 }}>
-                  <strong>File:</strong> {currentClip.file_name} | 
-                  <strong> Time:</strong> {typeof currentClip.clip_start === 'number' ? currentClip.clip_start.toFixed(1) : currentClip.clip_start}s - {typeof currentClip.clip_end === 'number' ? currentClip.clip_end.toFixed(1) : currentClip.clip_end}s | 
+                  <strong>File:</strong> {currentClip.file_name} |
+                  <strong> Time:</strong> {typeof currentClip.clip_start === 'number' ? currentClip.clip_start.toFixed(2) : currentClip.clip_start}s - {typeof currentClip.clip_end === 'number' ? currentClip.clip_end.toFixed(2) : currentClip.clip_end}s |
                   <strong> Score:</strong> {typeof currentClip.score === 'number' ? currentClip.score.toFixed(3) : currentClip.score} |
                   <strong> Clip:</strong> {currentClipIndex + 1} of {clips.length}
                 </p>
@@ -790,10 +1047,24 @@ const ActiveLearning = ({ isActive = true }) => {
           </div>
 
           <div>
-            <h4>Spectrogram</h4>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <h4 style={{ margin: 0 }}>Spectrogram</h4>
+              {spectrogram && (
+                <button
+                  onClick={saveSpectrogram}
+                  className="btn btn-secondary btn-sm"
+                  style={{
+                    fontSize: '0.8rem',
+                    padding: '4px 10px'
+                  }}
+                >
+                  Save Image
+                </button>
+              )}
+            </div>
             {spectrogram ? (
-              <img 
-                src={spectrogram} 
+              <img
+                src={spectrogram}
                 alt="Spectrogram" 
                 style={{ 
                   width: '100%', 
@@ -953,7 +1224,29 @@ const ActiveLearning = ({ isActive = true }) => {
                 >
                   Uncertain (3)
                 </button>
-                
+
+                {reviewMode === 'review_annotated' && (
+                  <div style={{ marginTop: '15px', paddingTop: '15px', borderTop: '2px solid #dc3545' }}>
+                    <button
+                      onClick={deleteAnnotation}
+                      className="btn btn-danger"
+                      style={{ fontSize: '0.9rem', backgroundColor: '#dc3545' }}
+                    >
+                      Delete Annotation
+                    </button>
+                    <small style={{
+                      display: 'block',
+                      color: '#dc3545',
+                      fontSize: '0.8rem',
+                      marginTop: '5px',
+                      lineHeight: '1.3',
+                      fontWeight: 'bold'
+                    }}>
+                      Remove the annotation for the current class from this clip
+                    </small>
+                  </div>
+                )}
+
                 {availableClasses.length > 1 && (
                   <div style={{ marginTop: '15px', paddingTop: '15px', borderTop: '1px solid #ddd' }}>
                     <button
@@ -963,10 +1256,10 @@ const ActiveLearning = ({ isActive = true }) => {
                     >
                       Mark Other Classes as "Not Present"
                     </button>
-                    <small style={{ 
-                      display: 'block', 
-                      color: '#666', 
-                      fontSize: '0.8rem', 
+                    <small style={{
+                      display: 'block',
+                      color: '#666',
+                      fontSize: '0.8rem',
                       marginTop: '5px',
                       lineHeight: '1.3'
                     }}>

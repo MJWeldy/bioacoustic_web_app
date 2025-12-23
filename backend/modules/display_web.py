@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
+from matplotlib.ticker import ScalarFormatter
 import librosa
 import librosa.display
 import random
@@ -19,6 +20,25 @@ from typing import Dict, List, Tuple, Optional, Union
 
 from modules import config as cfg
 from modules import utilities as u
+
+def format_time_hms(seconds: float) -> str:
+    """
+    Format time in seconds as HH:MM:SS.ss
+
+    Args:
+        seconds: Time in seconds
+
+    Returns:
+        Formatted time string
+    """
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:05.2f}"
+    else:
+        return f"{minutes}:{secs:05.2f}"
 
 class WebAnnotationInterface:
     """
@@ -51,11 +71,12 @@ class WebAnnotationInterface:
         
         # Top 10+score quantiles mode specific variables
         self.quantile_round_clips = []
+        self.quantile_round_metadata = []  # Store category info for each clip in round
         self.quantile_position = -1
         self.quantile_round_complete = False
         
         # Validate review mode
-        if self.review_mode not in ["random", "top_down", "top_10+score_quantiles"]:
+        if self.review_mode not in ["random", "top_down", "top_10+score_quantiles", "review_annotated"]:
             print(f"Invalid review mode: {self.review_mode}. Using 'random' instead.")
             self.review_mode = "random"
 
@@ -115,20 +136,31 @@ class WebAnnotationInterface:
 
         # Add colorbar
         plt.colorbar(img, format='%+2.0f dB')
-        plt.xlabel("Time (seconds)")
+        plt.xlabel("Time (minutes:seconds)")
+
+        # Format x-axis to mm:ss
+        from matplotlib.ticker import FuncFormatter
+        def format_m_s(x, pos):
+            minutes = int(x // 60)
+            seconds = int(x % 60)
+            return f"{minutes:02d}:{seconds:02d}"
+        
+        ax = plt.gca()
+        ax.xaxis.set_major_formatter(FuncFormatter(format_m_s))
 
         # Add vertical lines for clip boundaries
         plt.axvline(x=clip_start, color='r', linestyle='-', linewidth=2, alpha=0.7)
         plt.axvline(x=clip_end, color='r', linestyle='-', linewidth=2, alpha=0.7)
 
-        # Add text labels
-        plt.text(clip_start, 0, f"{clip_start:.1f}s", color='r', fontweight='bold', 
+        # Add text labels with HMS format
+        plt.text(clip_start, 0, format_time_hms(clip_start), color='r', fontweight='bold',
                 verticalalignment='bottom', horizontalalignment='center')
-        plt.text(clip_end, 0, f"{clip_end:.1f}s", color='r', fontweight='bold', 
+        plt.text(clip_end, 0, format_time_hms(clip_end), color='r', fontweight='bold',
                 verticalalignment='bottom', horizontalalignment='center')
 
-        # Set title
-        plt.title(f'Clip: {clip_start:.1f}s - {clip_end:.1f}s (Duration: {clip_end-clip_start:.1f}s)')
+        # Set title with HMS format
+        duration = clip_end - clip_start
+        plt.title(f'Clip: {format_time_hms(clip_start)} - {format_time_hms(clip_end)} (Duration: {duration:.2f}s)')
         plt.tight_layout(pad=0.5)
 
         # Convert to base64
@@ -176,76 +208,122 @@ class WebAnnotationInterface:
         # Reset quantile mode state when filters change
         if self.review_mode == "top_10+score_quantiles":
             self.quantile_round_clips = []
+            self.quantile_round_metadata = []
             self.quantile_position = -1
             self.quantile_round_complete = False
         
         self.filtered_df = filtered_df
         return filtered_df
 
-    def _generate_quantile_round_clips(self) -> List[int]:
+    def get_annotated_clips_for_review(self, class_name: str = None) -> pl.DataFrame:
+        """
+        Get clips that have been annotated, for review mode.
+
+        Args:
+            class_name: Optional class name to filter by
+
+        Returns:
+            DataFrame of annotated clips with their annotation information
+        """
+        # Get annotated clips from the database
+        annotated_df = self.audio_db.get_annotated_clips_only(class_name)
+
+        # Sort in sequential order for review
+        if self.review_mode == "top_down" or self.review_mode == "random":
+            # Sort by file, then by clip start time for logical ordering
+            annotated_df = annotated_df.sort(["file_path", "clip_start"])
+
+        self.filtered_df = annotated_df
+        # Reset position for sequential review
+        self.top_down_position = -1
+
+        return annotated_df
+
+    def _generate_quantile_round_clips(self) -> Tuple[List[int], List[Dict]]:
         """
         Generate indices for the top 10+score quantiles review mode.
         Returns up to 50 clips: top 10 highest scoring + 10 clips from each of 4 score quantiles.
-        
+
         Returns:
-            List of clip indices for the round
+            Tuple of (list of clip indices, list of metadata dicts with category info)
         """
         if self.filtered_df is None or len(self.filtered_df) == 0:
-            return []
-        
+            return [], []
+
+        # Get the current class index from the audio database
+        class_index = getattr(self.audio_db, '_current_class_index', 0)
+
         # Get scores and sort indices by score (descending)
         scores_with_indices = []
         for i in range(len(self.filtered_df)):
             # Get confidence prediction scores - assuming they exist in the dataframe
             row = self.filtered_df.row(i)
             clip_dict = dict(zip(self.filtered_df.columns, row))
-            
-            # Extract max score across all classes for ranking
+
+            # Extract score for the current target class only (not max across all classes)
             confidence_predictions = clip_dict.get('confidence_predictions', [])
-            if confidence_predictions:
-                max_score = max(confidence_predictions) if isinstance(confidence_predictions, list) else confidence_predictions
+            if confidence_predictions and isinstance(confidence_predictions, list):
+                # Use the score for the current target class
+                if class_index < len(confidence_predictions):
+                    target_class_score = confidence_predictions[class_index]
+                else:
+                    target_class_score = 0.0
+            elif confidence_predictions:
+                # Single value (shouldn't happen in multiclass, but handle it)
+                target_class_score = confidence_predictions
             else:
-                max_score = 0.0
-            
-            scores_with_indices.append((i, max_score))
-        
+                target_class_score = 0.0
+
+            scores_with_indices.append((i, target_class_score))
+
         # Sort by score descending
         scores_with_indices.sort(key=lambda x: x[1], reverse=True)
-        
+
         round_indices = []
-        
+        round_metadata = []
+
         # 1. Top 10 highest scoring clips
         top_10_indices = [idx for idx, score in scores_with_indices[:10]]
         round_indices.extend(top_10_indices)
+        for idx in top_10_indices:
+            round_metadata.append({
+                "category": "top_10",
+                "category_label": "Top 10 Highest Scores"
+            })
         print(f"DEBUG Quantiles: Added top 10 clips with scores: {[score for _, score in scores_with_indices[:10]]}")
-        
+
         # 2. Score quantile ranges: 0-0.5, 0.5-0.75, 0.75-0.875, 0.875-1.0
         score_ranges = [
-            (0.0, 0.5),
-            (0.5, 0.75), 
-            (0.75, 0.875),
-            (0.875, 1.0)
+            (0.0, 0.5, "quantile_0.0_0.5", "Quantile: 0.0-0.5"),
+            (0.5, 0.75, "quantile_0.5_0.75", "Quantile: 0.5-0.75"),
+            (0.75, 0.875, "quantile_0.75_0.875", "Quantile: 0.75-0.875"),
+            (0.875, 1.0, "quantile_0.875_1.0", "Quantile: 0.875-1.0")
         ]
-        
-        for min_score, max_score in score_ranges:
+
+        for min_score, max_score, category, category_label in score_ranges:
             # Find clips in this score range (excluding top 10 already selected)
             range_indices = []
             for idx, score in scores_with_indices:
                 if idx not in top_10_indices and min_score <= score <= max_score:
                     range_indices.append(idx)
-            
+
             # Randomly select up to 10 clips from this range
             if range_indices:
                 selected_count = min(10, len(range_indices))
                 selected_indices = random.sample(range_indices, selected_count)
                 round_indices.extend(selected_indices)
+                for idx in selected_indices:
+                    round_metadata.append({
+                        "category": category,
+                        "category_label": category_label
+                    })
                 scores_for_range = [scores_with_indices[i][1] for i in range(len(scores_with_indices)) if scores_with_indices[i][0] in selected_indices]
                 print(f"DEBUG Quantiles: Added {selected_count} clips from range {min_score}-{max_score} with scores: {scores_for_range}")
             else:
                 print(f"DEBUG Quantiles: No clips found in range {min_score}-{max_score}")
-        
+
         print(f"DEBUG Quantiles: Generated round with {len(round_indices)} total clips")
-        return round_indices
+        return round_indices, round_metadata
 
     def get_next_clip(self) -> Optional[Dict]:
         """
@@ -261,7 +339,7 @@ class WebAnnotationInterface:
             random_idx = random.randint(0, len(self.filtered_df) - 1)
             clip_row = self.filtered_df.row(random_idx)
             self.current_index = random_idx
-        elif self.review_mode == "top_down":
+        elif self.review_mode == "top_down" or self.review_mode == "review_annotated":
             if self.top_down_position < len(self.filtered_df) - 1:
                 self.top_down_position += 1
                 clip_row = self.filtered_df.row(self.top_down_position)
@@ -272,31 +350,40 @@ class WebAnnotationInterface:
             # Check if we need to generate a new round
             if not self.quantile_round_clips or self.quantile_position >= len(self.quantile_round_clips) - 1:
                 # Generate new round of clips
-                self.quantile_round_clips = self._generate_quantile_round_clips()
+                self.quantile_round_clips, self.quantile_round_metadata = self._generate_quantile_round_clips()
                 self.quantile_position = -1
                 self.quantile_round_complete = False
                 print(f"DEBUG Quantiles: Generated new round with {len(self.quantile_round_clips)} clips")
-                
+
                 if not self.quantile_round_clips:
                     return None
-            
+
             # Get next clip from current round
             if self.quantile_position < len(self.quantile_round_clips) - 1:
                 self.quantile_position += 1
                 clip_index = self.quantile_round_clips[self.quantile_position]
                 clip_row = self.filtered_df.row(clip_index)
                 self.current_index = clip_index
-                
+
                 # Mark round as complete when we reach the last clip
                 if self.quantile_position == len(self.quantile_round_clips) - 1:
                     self.quantile_round_complete = True
                     print(f"DEBUG Quantiles: Completed round ({self.quantile_position + 1}/{len(self.quantile_round_clips)} clips)")
             else:
                 return None
-        
+
         # Convert row to dict using proper column names
         clip_dict = dict(zip(self.filtered_df.columns, clip_row))
-        return self._convert_clip_dict(clip_dict)
+        result = self._convert_clip_dict(clip_dict)
+
+        # Add round metadata for quantile mode
+        if self.review_mode == "top_10+score_quantiles" and self.quantile_position >= 0:
+            result["round_position"] = self.quantile_position + 1
+            result["round_total"] = len(self.quantile_round_clips)
+            result["round_category"] = self.quantile_round_metadata[self.quantile_position]["category"]
+            result["round_category_label"] = self.quantile_round_metadata[self.quantile_position]["category_label"]
+
+        return result
 
 
     def _convert_clip_dict(self, clip_dict: Dict) -> Dict:

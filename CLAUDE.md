@@ -1,234 +1,233 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with this repository.
+
+---
+
+## Quick Reference for Claude Code
+
+### Python Script Execution
+**CRITICAL**: Always use the bioacoustics-web-app conda environment with full path:
+
+```bash
+# For Claude Code (direct python execution)
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python <script-name>.py
+
+# Common commands
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python main.py
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --verbose
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python -m pytest tests/ -v
+
+# Check package availability
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python -c "import polars; print('✓ Available')"
+```
+
+### Testing Framework
+**93 test functions** covering all backend components with comprehensive mocking:
+
+```bash
+# Run all tests
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --verbose
+
+# Test categories
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --unit
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --integration
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --fast
+
+# Specific modules
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --module database
+```
+
+### Required Dependencies
+- **httpx compatibility**: `pip install "httpx<0.27"` for FastAPI TestClient
+- **Main packages**: All packages in environment.yml (polars, fastapi, tensorflow, etc.)
+
+---
+
+## Development Guidelines
+
+### Code Style Standards
+- **Descriptive names**: Use clear, meaningful variable and function names
+- **Function names**: Active verbs describing what the function does
+- **Naming convention**: `lower_case_with_underscores` (e.g., `get_data`, `process_audio`)
+
+### Development Philosophy (TDD)
+1. **Generate failing tests** based on expected inputs and outputs
+2. **Ask for review** of new tests before implementing
+3. **Execute tests** to confirm they fail (TDD requirement)
+4. **Write minimal code** to make tests pass
+5. **Refactor** for readability without changing behavior
+6. **Repeat cycle** until feature is complete
+
+### Git Workflow
+- Write and run tests before committing
+- Make regular commits when features are working
+- Create descriptive commit messages
+
+---
 
 ## Project Overview
 
-This is a **Bioacoustics Active Learning Web Application** that replaces a Jupyter notebook workflow with a modern FastAPI + React web interface. The application provides a complete pipeline for building datasets, performing active learning annotation, training models, and evaluating performance in bioacoustic classification tasks.
+**Bioacoustics Active Learning Web Application** - Replaces Jupyter notebook workflow with modern FastAPI + React interface for building datasets, performing active learning annotation, training models, and evaluating performance in bioacoustic classification.
 
-**Core Architecture**: FastAPI backend serving RESTful APIs + React frontend with tabbed interface + Python modules for audio processing and machine learning.
+**Core Architecture**: FastAPI backend + React frontend + Python audio processing modules
 
-## Common Development Commands
+### Key Components
 
-### Environment Management
+**Backend** (`backend/`):
+- `main.py`: FastAPI application with REST endpoints and state management
+- `modules/database.py`: Three-table architecture (files → clips → annotations) using Polars
+- `modules/utilities.py`: Audio processing, embedding generation, model integration
+- `modules/classifier.py`: TensorFlow training with custom BCE loss
+- `modules/config.py`: Backend model configurations (BirdNET, PERCH, etc.)
+
+**Frontend** (`frontend/src/`):
+- `App.js`: Tabbed interface with state management
+- `components/`: DatasetBuilder, ActiveLearning, ModelTraining, Evaluation, DatabaseViewer
+
+**Database Architecture**:
+```
+files (metadata) → clips (segments) → annotations (labels)
+file_id           clip_id (FK)       clip_id (FK)
+file_path         clip_start         class_name
+duration_sec      clip_end           label_value
+sampling_rate     annotation_status  annotator_id
+```
+
+---
+
+## Development Commands
+
+### Environment Setup
 ```bash
-# Initial setup (Linux/macOS)
-./setup.sh
-
-# Initial setup (Windows)
-setup.bat
+# Initial setup
+./setup.sh          # Linux/macOS
+setup.bat            # Windows
 
 # Start development servers
-./run_dev.sh     # Linux/macOS
-run_dev.bat      # Windows
+./run_dev.sh         # Linux/macOS
+run_dev.bat          # Windows
 
-# Health checks and diagnostics
-./health_check.sh    # Comprehensive system validation (22 tests)
+# System validation
+./health_check.sh    # 22 comprehensive tests
 ./test_setup.sh      # Quick package verification
-./reset.sh           # Clean up processes/ports if stuck
+./reset.sh           # Clean up stuck processes/ports
 ```
 
 ### Backend Development
 ```bash
-# Activate environment
+# For human users (manual activation required)
 conda activate bioacoustics-web-app
 
-# Start backend only (manual)
+# Start backend
 cd backend && python main.py
 
-# Test backend endpoints
+# API testing
 curl http://localhost:8000/docs  # FastAPI documentation
 curl http://localhost:8000/      # Health check
 
 # Debug imports
 python -c "from modules import config; print('✓ Modules working')"
-```
 
-### Frontend Development
-```bash
-# Start frontend only (manual)
-cd frontend && npm start
+# Database testing
+python -c "from backend.modules import database; print('✓ Database working')"
 
-# Install dependencies
-cd frontend && npm install
-
-# Build for production
-cd frontend && npm run build
-
-# Run tests
-cd frontend && npm test
-```
-
-### Database Operations
-```bash
-# Test database functionality
-python -c "from backend.modules import database; print('✓ Database module working')"
-
-# Check TensorFlow
+# TensorFlow check
 python -c "import tensorflow; print('TF version:', tensorflow.__version__)"
 ```
 
-## High-Level Architecture
+### Frontend Development
+```bash
+cd frontend
 
-### Backend Structure (`backend/`)
+# Install and start
+npm install
+npm start
 
-**Main Application** (`main.py`):
-- FastAPI application with all REST endpoints
-- Global application state management for datasets, models, and active sessions
-- Cross-Origin Resource Sharing (CORS) for React frontend integration
-- Real-time progress tracking for long-running operations (dataset building, training)
-
-**Core Modules** (`backend/modules/`):
-- `database.py`: **Three-table architecture** (files → clips → annotations) using Polars for performance
-- `utilities.py`: Audio processing, embedding generation, and backend model integration
-- `classifier.py`: TensorFlow model training with custom BCE loss for weak/strong labels
-- `config.py`: Backend model configurations (BirdNET, PERCH, PNW_Cnet, etc.)
-- `display_web.py`: Web-compatible annotation interface (replaces Jupyter widgets)
-
-### Frontend Structure (`frontend/src/`)
-
-**Main Application** (`App.js`):
-- Tabbed interface with global state management
-- Toast notifications for user feedback
-- Responsive design with consistent styling
-
-**Core Components** (`components/`):
-- `DatasetBuilder.js`: Dataset creation interface with progress tracking
-- `ActiveLearning.js`: Interactive annotation with spectrogram visualization and audio playback
-- `ModelTraining.js`: Model training interface with real-time progress monitoring
-- `Evaluation.js`: Model evaluation with metrics visualization
-- `DatabaseViewer.js`: Database exploration and management interface
-
-### Key Architectural Patterns
-
-**State Management**:
-- Backend: Global `app_state` dictionary for session persistence
-- Frontend: Component-level React state with prop passing
-- Real-time updates: Polling-based status checks for long operations
-
-**Data Flow**:
-1. **Dataset Building**: Audio files → Embeddings → Three-table database
-2. **Active Learning**: Database → Filtered clips → User annotations → Updated database
-3. **Model Training**: Annotated clips → Feature vectors → TensorFlow model → Saved classifier
-4. **Evaluation**: Test clips + Trained model → Predictions → Performance metrics
-
-**Database Architecture** (Critical for understanding):
-```
-files (metadata) → clips (segments) → annotations (human labels)
-     ↓                    ↓                     ↓
-file_id             clip_id (FK)        clip_id (FK)
-file_path           clip_start          class_name
-duration_sec        clip_end            label_value
-sampling_rate       annotation_status   annotator_id
-                    confidence_scores   timestamp
+# Build and test
+npm run build
+npm test
 ```
 
-## Development Workflows
+### Package Management
+```bash
+# Install new packages (requires activation)
+conda activate bioacoustics-web-app
+conda install <package>  # or pip install <package>
+```
+
+---
+
+## Key Development Workflows
 
 ### Adding New Backend Models
-
-1. **Configuration** (`config.py`): Add model parameters (sample_rate, context_frames, etc.)
-2. **Processing Logic** (`utilities.py`): Implement embedding generation for new model
-3. **Frontend Integration** (`DatasetBuilder.js`): Add model option to dropdown
-4. **API Updates**: No changes needed - model selection is configuration-driven
+1. **Configuration** (`config.py`): Add model parameters
+2. **Processing** (`utilities.py`): Implement embedding generation
+3. **Frontend** (`DatasetBuilder.js`): Add to model dropdown
+4. **API**: No changes needed (configuration-driven)
 
 ### Extending Annotation Interface
-
-**Backend Changes**:
-- `display_web.py`: Core annotation logic and filtering
-- `main.py`: New API endpoints for annotation features
-- `database.py`: Schema changes for new annotation types
-
-**Frontend Changes**:
-- `ActiveLearning.js`: UI components and user interactions
-- Ensure real-time label updates and progress tracking integration
+**Backend**: Update `display_web.py`, `main.py` endpoints, `database.py` schema
+**Frontend**: Modify `ActiveLearning.js` components and interactions
 
 ### Multiclass Annotation System
-
-The application implements a sophisticated multiclass annotation system:
-
-**Key Features**:
-- **Target Class Selection**: Primary class being annotated (drives score filtering)
-- **Additional Positive Classes**: Multi-select interface for marking other present classes
-- **Label Strength Tracking**: Strong vs weak labels for training optimization
-- **Export Preservation**: Complete annotation state maintained through export/import cycle
-
+**Features**: Target class selection, additional positive classes, label strength tracking
 **API Endpoints**:
-- `/api/active-learning/annotate`: Annotate target class
-- `/api/active-learning/annotate-class`: Annotate specific class by index
-- `/api/active-learning/annotate-other-classes`: Mark non-target classes as absent
+- `/api/active-learning/annotate`: Target class annotation
+- `/api/active-learning/annotate-class`: Specific class annotation
+- `/api/active-learning/annotate-other-classes`: Mark classes as absent
 
 ### Model Training Pipeline
+**Features**: Priority-based label loading, custom BCE loss, multiclass support
+**Data Formats**: Metadata JSON → Modern filenames → Legacy support
 
-**Enhanced Features**:
-- **Priority-Based Label Loading**: Metadata → Modern filenames → Legacy formats
-- **Custom BCE Loss**: Weighted loss function for strong/weak labels (default weak weight: 0.05)
-- **Multiclass Support**: Full multiclass training with partial annotation handling
-- **Real-time Monitoring**: Progress tracking, loss visualization, macro cMAP scores
+---
 
-**Training Data Formats**:
-1. **Metadata JSON** (preferred): Complete binary vectors with strength information
-2. **Modern Filenames**: `originalname_clipstart-class1+class2.wav` format
-3. **Legacy Support**: Underscore separators and embedded class names
-
-## Technical Implementation Notes
+## Technical Implementation
 
 ### Performance Considerations
-
-**Backend**:
-- Polars DataFrame operations for large dataset handling
-- TensorFlow model caching and GPU utilization
-- Embedding pre-computation and storage
-- Asynchronous API endpoints for non-blocking operations
-
-**Frontend**:
-- Component-level state management (no global state library needed)
-- Efficient spectrogram rendering and audio streaming
-- Progress polling for long operations (dataset building, training)
+**Backend**: Polars DataFrames, TensorFlow caching, embedding pre-computation, async endpoints
+**Frontend**: Component-level state, efficient spectrogram rendering, progress polling
 
 ### File Format Conventions
-
-**Audio Export Naming**:
-```
-Site_001_Rep_C_165.0-YRWA_song_1+BRMA_call_1.wav
-└─── original name ──┘└─ start time ─┘└─ classes ─┘
-```
-
-**Database Files**:
-- `audio_database.parquet`: Main three-table database
-- `metadata.json`: Dataset configuration and class mappings
-- `embeddings.pkl`: Pre-computed embedding vectors
+**Audio Export**: `originalname_clipstart-class1+class2.wav`
+**Database Files**: `audio_database.parquet`, `metadata.json`, `embeddings.pkl`
 
 ### Cross-Platform Compatibility
+- Conda environment with `environment.yml`
+- Platform-specific scripts (`.sh`/`.bat`)
+- Automatic path handling
 
-**Environment**: Uses conda environment with `environment.yml` for consistent package versions across platforms
-**Scripts**: Platform-specific setup and run scripts (`.sh` for Unix, `.bat` for Windows)
-**Paths**: Automatic path handling in backend for cross-platform file operations
+### Error Handling
+**Backend**: HTTP exceptions with detailed messages
+**Frontend**: Toast notifications with graceful degradation
+**Database**: Transaction-like operations with rollback
 
-### Error Handling Patterns
-
-**Backend**: HTTP exception handling with detailed error messages and debug logging
-**Frontend**: Toast notifications for user feedback with graceful degradation
-**Database**: Transaction-like operations with rollback capabilities for failed operations
+---
 
 ## Development Tips
 
-### Debugging Backend Issues
-- Check `logs/backend.log` for FastAPI server logs
-- Use `/docs` endpoint for interactive API testing
-- Verify module imports with test commands in environment
+### Debugging
+**Backend**: Check `logs/backend.log`, use `/docs` endpoint, verify imports
+**Frontend**: Hot-reload, browser dev tools, network tab debugging
+**Database**: Version detection migrations, test with new/existing datasets
 
-### Frontend Development
-- React development server hot-reloads on changes
-- Browser developer tools for component state inspection
-- Network tab for API request/response debugging
+### Audio Processing Notes
+- Sample rates converted automatically per model
+- Embedding generation: 2-3 minute startup time
+- Format support via `librosa` and `soundfile`
 
-### Database Schema Changes
-- Database migrations handled through version detection in `database.py`
-- Legacy format support maintained for backward compatibility
-- Always test with both new and existing datasets
+---
 
-### Audio Processing
-- Sample rate conversions handled automatically per backend model
-- Embedding generation is CPU/GPU intensive - expect 2-3 minutes startup time
-- Audio file format support depends on `librosa` and `soundfile` capabilities
+## Architecture Patterns
+
+### State Management
+- **Backend**: Global `app_state` dictionary for session persistence
+- **Frontend**: Component-level React state with prop passing
+- **Updates**: Polling-based status checks for long operations
+
+### Data Flow
+1. **Dataset Building**: Audio files → Embeddings → Three-table database
+2. **Active Learning**: Database → Filtered clips → Annotations → Updated database
+3. **Model Training**: Annotated clips → Feature vectors → TensorFlow model
+4. **Evaluation**: Test clips + Model → Predictions → Performance metrics
