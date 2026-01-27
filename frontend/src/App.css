@@ -296,6 +296,39 @@
   grid-template-columns: 1fr 1fr 1fr;
 }
 
+.grid-4 {
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+}
+
+.grid-5 {
+  grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
+}
+
+/* Compact form variants */
+.form-group-sm {
+  margin-bottom: 0.75rem;
+}
+
+.form-group-sm label {
+  margin-bottom: 0.25rem;
+  font-size: 0.875rem;
+}
+
+.form-control-sm {
+  padding: 0.4rem 0.6rem;
+  font-size: 0.9rem;
+}
+
+.card-sm {
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.card-header-sm {
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+}
+
 @keyframes spin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }

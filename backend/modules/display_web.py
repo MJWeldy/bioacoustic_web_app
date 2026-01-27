@@ -107,6 +107,10 @@ class WebAnnotationInterface:
         # Extract the buffered audio segment
         y_buffered = u.load_audio(audio_path, (buffered_start, buffered_end, f.samplerate))
 
+        # Convert stereo to mono if necessary
+        if len(y_buffered.shape) > 1:
+            y_buffered = np.mean(y_buffered, axis=1)
+
         # Create figure
         plt.figure(figsize=(15, 6))
 

@@ -1393,24 +1393,48 @@ class ValidationDB:
             self.project_name = metadata.get('project_name')
 
             # Load each dataframe if file exists
+            # Strategy: Check file in project dir first (robust to moves), then fallback to metadata path
             file_paths = metadata.get('file_paths', {})
+            
+            # Helper to load parquet with fallback
+            def load_table(filename, metadata_key):
+                # 1. Try direct file in project directory
+                direct_path = project_dir / filename
+                if direct_path.exists():
+                    print(f"DEBUG: Loading {filename} from {direct_path}")
+                    return pl.read_parquet(direct_path)
+                
+                # 2. Try path from metadata
+                meta_path_str = file_paths.get(metadata_key)
+                if meta_path_str:
+                    meta_path = Path(meta_path_str)
+                    if meta_path.exists():
+                        print(f"DEBUG: Loading {filename} from metadata path: {meta_path}")
+                        return pl.read_parquet(meta_path)
+                
+                return None
 
-            if file_paths.get('predictions') and Path(file_paths['predictions']).exists():
-                self.predictions_df = pl.read_parquet(file_paths['predictions'])
-                # Deduplicate loaded predictions to clean up any duplicates from previous saves
+            # Load tables
+            preds = load_table("predictions.parquet", "predictions")
+            if preds is not None:
+                self.predictions_df = preds
+                # Deduplicate loaded predictions
                 self.predictions_df = self.predictions_df.unique(
                     subset=['filename', 'start_time', 'end_time', 'species_name', 'model_name'],
                     keep='first'
                 )
 
-            if file_paths.get('annotations') and Path(file_paths['annotations']).exists():
-                self.validation_annotations_df = pl.read_parquet(file_paths['annotations'])
+            anns = load_table("annotations.parquet", "annotations")
+            if anns is not None:
+                self.validation_annotations_df = anns
 
-            if file_paths.get('strata_definitions') and Path(file_paths['strata_definitions']).exists():
-                self.strata_definitions_df = pl.read_parquet(file_paths['strata_definitions'])
+            strata = load_table("strata_definitions.parquet", "strata_definitions")
+            if strata is not None:
+                self.strata_definitions_df = strata
 
-            if file_paths.get('validation_progress') and Path(file_paths['validation_progress']).exists():
-                self.validation_progress_df = pl.read_parquet(file_paths['validation_progress'])
+            prog = load_table("validation_progress.parquet", "validation_progress")
+            if prog is not None:
+                self.validation_progress_df = prog
 
             return {
                 'status': 'success',

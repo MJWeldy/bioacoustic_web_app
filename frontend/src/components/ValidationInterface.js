@@ -23,12 +23,14 @@ const ValidationInterface = () => {
   
   // Session mode: 'validate' (default) or 'review'
   const [sessionMode, setSessionMode] = useState('validate');
+  const [selectionStrategy, setSelectionStrategy] = useState('top_down');
 
   // Current validation state
   const [currentClip, setCurrentClip] = useState(null);
   const [validationQueue, setValidationQueue] = useState([]);
   const [queueIndex, setQueueIndex] = useState(0);
   const [sessionProgress, setSessionProgress] = useState(null);
+  const [overallProgress, setOverallProgress] = useState(null);
 
   // Audio playback
   const audioRef = useRef(null);
@@ -249,7 +251,8 @@ const ValidationInterface = () => {
         strata_id: strataId,
         species_name: speciesName,
         validation_rules: cleanRules,
-        review_mode: sessionMode === 'review'
+        review_mode: sessionMode === 'review',
+        selection_strategy: selectionStrategy
       });
 
       console.log('Session started successfully');
@@ -258,6 +261,7 @@ const ValidationInterface = () => {
         setValidationQueue(response.data.validation_queue);
         setQueueIndex(0);
         setSessionProgress(response.data.session_progress);
+        setOverallProgress(response.data.overall_progress);
 
         if (response.data.validation_queue.length > 0) {
           // Small delay to ensure audio element is ready
@@ -416,6 +420,7 @@ const ValidationInterface = () => {
       if (response.data.status === 'success') {
         // Update session progress
         setSessionProgress(response.data.session_progress);
+        setOverallProgress(response.data.overall_progress);
 
         // Update local queue with new annotation
         const updatedQueue = [...validationQueue];
@@ -568,34 +573,31 @@ const ValidationInterface = () => {
   return (
     <div>
       {/* Load Project Section */}
-      <div className="card">
-        <div className="card-header">
+      <div className="card card-sm">
+        <div className="card-header card-header-sm">
           <h3>Load Validation Project</h3>
-          <p>Load an existing validation project to continue work</p>
+          <p style={{ margin: 0, fontSize: '0.875rem' }}>Load an existing validation project to continue work</p>
         </div>
 
         <div className="grid grid-2">
-          <div className="form-group">
+          <div className="form-group form-group-sm">
             <label htmlFor="projectSearchLocation">Project Location</label>
             <input
               type="text"
               id="projectSearchLocation"
-              className="form-control"
+              className="form-control form-control-sm"
               placeholder="/path/to/validation/projects"
               value={projectSearchLocation}
               onChange={(e) => setProjectSearchLocation(e.target.value)}
               disabled={isLoading}
             />
-            <small style={{ color: '#666', fontSize: '0.875rem' }}>
-              Directory containing validation projects
-            </small>
           </div>
 
-          <div className="form-group" style={{ display: 'flex', alignItems: 'end' }}>
+          <div className="form-group form-group-sm" style={{ display: 'flex', alignItems: 'end' }}>
             <button
               onClick={listProjects}
               disabled={isLoading || !projectSearchLocation.trim()}
-              className="btn btn-secondary"
+              className="btn btn-secondary btn-sm"
               style={{ width: '100%' }}
             >
               Browse Projects
@@ -605,12 +607,12 @@ const ValidationInterface = () => {
       </div>
 
       {/* Session Configuration */}
-      <div className="card">
-        <div className="card-header">
+      <div className="card card-sm">
+        <div className="card-header card-header-sm">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div>
               <h3>Validation Session Setup</h3>
-              <p>Select strata and species for systematic validation</p>
+              <p style={{ margin: 0, fontSize: '0.875rem' }}>Select strata and species for systematic validation</p>
             </div>
             <button
               onClick={loadAvailableStrata}
@@ -623,12 +625,13 @@ const ValidationInterface = () => {
           </div>
           {availableStrata.length === 0 && (
             <div style={{
-              padding: '0.75rem',
+              padding: '0.5rem',
               backgroundColor: '#fff3cd',
               border: '1px solid #ffeaa7',
               borderRadius: '4px',
               color: '#856404',
-              marginTop: '1rem'
+              marginTop: '0.5rem',
+              fontSize: '0.875rem'
             }}>
               <strong>No validation strata available.</strong> Please go to the Dataset Builder tab to create a validation dataset, or load an existing project above.
             </div>
@@ -636,11 +639,11 @@ const ValidationInterface = () => {
         </div>
 
         <div className="grid grid-2">
-          <div className="form-group">
+          <div className="form-group form-group-sm">
             <label htmlFor="strataSelect">Validation Strata</label>
             <select
               id="strataSelect"
-              className="form-control"
+              className="form-control form-control-sm"
               value={selectedStrata}
               onChange={(e) => setSelectedStrata(e.target.value)}
               disabled={isLoading}
@@ -658,11 +661,11 @@ const ValidationInterface = () => {
             </select>
           </div>
 
-          <div className="form-group">
+          <div className="form-group form-group-sm">
             <label htmlFor="speciesSelect">Target Species</label>
             <select
               id="speciesSelect"
-              className="form-control"
+              className="form-control form-control-sm"
               value={selectedSpecies}
               onChange={(e) => setSelectedSpecies(e.target.value)}
               disabled={isLoading || !selectedStrata}
@@ -681,12 +684,12 @@ const ValidationInterface = () => {
           </div>
         </div>
 
-        <div className="grid grid-3">
-          <div className="form-group">
+        <div className="grid grid-4">
+          <div className="form-group form-group-sm">
             <label htmlFor="targetConfirmations">Target Confirmations</label>
             <select
               id="targetConfirmations"
-              className="form-control"
+              className="form-control form-control-sm"
               value={validationRules.target_confirmations}
               onChange={(e) => setValidationRules({
                 ...validationRules,
@@ -702,12 +705,27 @@ const ValidationInterface = () => {
             </select>
           </div>
 
-          <div className="form-group">
+          <div className="form-group form-group-sm">
+            <label htmlFor="selectionStrategy">Sort Strategy</label>
+            <select
+              id="selectionStrategy"
+              className="form-control form-control-sm"
+              value={selectionStrategy}
+              onChange={(e) => setSelectionStrategy(e.target.value)}
+              disabled={isLoading}
+            >
+              <option value="top_down">Top-Down (High Conf.)</option>
+              <option value="random">Random (Shuffle)</option>
+              <option value="bottom_up">Bottom-Up (Low Conf.)</option>
+            </select>
+          </div>
+
+          <div className="form-group form-group-sm">
             <label htmlFor="confidenceThreshold">Min Confidence</label>
             <input
               type="number"
               id="confidenceThreshold"
-              className="form-control"
+              className="form-control form-control-sm"
               min="0"
               max="1"
               step="0.01"
@@ -718,16 +736,13 @@ const ValidationInterface = () => {
               })}
               disabled={isLoading}
             />
-            <small style={{ color: '#666', fontSize: '0.875rem' }}>
-              Only include predictions above this confidence threshold
-            </small>
           </div>
 
-          <div className="form-group">
+          <div className="form-group form-group-sm">
             <label htmlFor="colorMode">Spectrogram Color</label>
             <select
               id="colorMode"
-              className="form-control"
+              className="form-control form-control-sm"
               value={colorMode}
               onChange={(e) => setColorMode(e.target.value)}
             >
@@ -738,78 +753,73 @@ const ValidationInterface = () => {
               ))}
             </select>
           </div>
+        </div>
 
-          <div className="form-group">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '1.5rem' }}>
-              <input
-                type="checkbox"
-                id="autoAdvance"
-                checked={validationRules.auto_advance}
-                onChange={(e) => setValidationRules({
-                  ...validationRules,
-                  auto_advance: e.target.checked
-                })}
-                disabled={isLoading}
-                style={{
-                  width: '18px',
-                  height: '18px',
-                  accentColor: '#6e7cb9'
-                }}
-              />
-              <label htmlFor="autoAdvance" style={{ margin: 0, cursor: 'pointer' }}>
-                Auto-advance
-              </label>
-            </div>
-            
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '0.5rem' }}>
-              <input
-                type="checkbox"
-                id="enableHotkeys"
-                checked={hotkeysEnabled}
-                onChange={(e) => setHotkeysEnabled(e.target.checked)}
-                style={{
-                  width: '18px',
-                  height: '18px',
-                  accentColor: '#0d6efd'
-                }}
-              />
-              <label htmlFor="enableHotkeys" style={{ margin: 0, cursor: 'pointer' }}>
-                Enable Hotkeys (Space=Play, C/Y=Confirm, R/N=Reject)
-              </label>
-            </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1.5rem', marginBottom: '1rem', marginTop: '1rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <input
+              type="checkbox"
+              id="autoAdvance"
+              checked={validationRules.auto_advance}
+              onChange={(e) => setValidationRules({
+                ...validationRules,
+                auto_advance: e.target.checked
+              })}
+              disabled={isLoading}
+              style={{ width: '16px', height: '16px', accentColor: '#6e7cb9' }}
+            />
+            <label htmlFor="autoAdvance" style={{ margin: 0, cursor: 'pointer', fontSize: '0.875rem', fontWeight: 'bold' }}>
+              Auto-advance
+            </label>
+          </div>
+          
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <input
+              type="checkbox"
+              id="enableHotkeys"
+              checked={hotkeysEnabled}
+              onChange={(e) => setHotkeysEnabled(e.target.checked)}
+              style={{ width: '16px', height: '16px', accentColor: '#0d6efd' }}
+            />
+            <label htmlFor="enableHotkeys" style={{ margin: 0, cursor: 'pointer', fontSize: '0.875rem', fontWeight: 'bold' }}>
+              Hotkeys (Space, C, R, U, S)
+            </label>
+          </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '0.5rem' }}>
-              <input
-                type="checkbox"
-                id="reviewMode"
-                checked={sessionMode === 'review'}
-                onChange={(e) => setSessionMode(e.target.checked ? 'review' : 'validate')}
-                disabled={isLoading}
-                style={{
-                  width: '18px',
-                  height: '18px',
-                  accentColor: '#dc3545'
-                }}
-              />
-              <label htmlFor="reviewMode" style={{ margin: 0, cursor: 'pointer', color: sessionMode === 'review' ? '#dc3545' : 'inherit', fontWeight: sessionMode === 'review' ? 'bold' : 'normal' }}>
-                Review Mode (Edit existing validations)
-              </label>
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <input
+              type="checkbox"
+              id="reviewMode"
+              checked={sessionMode === 'review'}
+              onChange={(e) => setSessionMode(e.target.checked ? 'review' : 'validate')}
+              disabled={isLoading}
+              style={{ width: '16px', height: '16px', accentColor: '#dc3545' }}
+            />
+            <label htmlFor="reviewMode" style={{ 
+              margin: 0, 
+              cursor: 'pointer', 
+              fontSize: '0.875rem',
+              color: sessionMode === 'review' ? '#dc3545' : 'inherit', 
+              fontWeight: 'bold' 
+            }}>
+              Review Mode
+            </label>
           </div>
         </div>
 
-        <div style={{ textAlign: 'center', marginTop: '1.5rem', display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+        <div style={{ textAlign: 'center', display: 'flex', gap: '1rem', justifyContent: 'center' }}>
           <button
             onClick={() => startValidationSession()}
             disabled={isLoading || !selectedStrata || !selectedSpecies}
-            className={`btn btn-lg ${sessionMode === 'review' ? 'btn-danger' : 'btn-primary'}`}
+            className={`btn btn-sm ${sessionMode === 'review' ? 'btn-danger' : 'btn-primary'}`}
+            style={{ minWidth: '200px' }}
           >
-            {isLoading ? 'Starting Session...' : sessionMode === 'review' ? 'Start Review Session' : 'Start Validation Session'}
+            {isLoading ? 'Starting...' : sessionMode === 'review' ? 'Start Review Session' : 'Start Validation Session'}
           </button>
           <button
             onClick={() => advanceToNextStrata()}
             disabled={isLoading || !selectedSpecies || availableStrata.length === 0}
-            className="btn btn-secondary btn-lg"
+            className="btn btn-secondary btn-sm"
           >
             Next Strata
           </button>
@@ -818,13 +828,13 @@ const ValidationInterface = () => {
 
       {/* Session Progress */}
       {sessionProgress && (
-        <div className="card">
-          <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h3>Session Progress</h3>
+        <div className="card card-sm">
+          <div className="card-header card-header-sm" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h3 style={{ fontSize: '1rem' }}>Session Progress</h3>
             <button
               onClick={saveProject}
               disabled={isSaving}
-              className="btn btn-success"
+              className="btn btn-success btn-sm"
             >
               {isSaving ? 'Saving...' : 'Save Project'}
             </button>
@@ -833,31 +843,42 @@ const ValidationInterface = () => {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '20px' }}>
             {/* Progress bar section */}
             <div style={{ flex: 1 }}>
-              <div style={{ marginBottom: '0.5rem' }}>
-                <span style={{ fontWeight: '600', fontSize: '0.9rem' }}>
-                  {sessionProgress.reviewed_clips}/{sessionProgress.total_clips} clips reviewed
-                  <span style={{ color: '#666', marginLeft: '10px' }}>
-                    ({Math.round((sessionProgress.reviewed_clips / sessionProgress.total_clips) * 100)}%)
-                  </span>
+              <div style={{ marginBottom: '0.25rem' }}>
+                <span style={{ fontWeight: '600', fontSize: '0.8rem' }}>
+                  {overallProgress ? (
+                    <>
+                      {overallProgress.completed_strata_species}/{overallProgress.total_strata_species} strata/species completed
+                      <span style={{ color: '#666', marginLeft: '10px' }}>
+                        ({Math.round((overallProgress.completed_strata_species / overallProgress.total_strata_species) * 100)}%)
+                      </span>
+                    </>
+                  ) : (
+                    'Loading progress...'
+                  )}
                 </span>
               </div>
               <div style={{
                 backgroundColor: '#e9ecef',
                 borderRadius: '4px',
                 overflow: 'hidden',
-                height: '8px'
+                height: '4px'
               }}>
                 <div style={{
-                  backgroundColor: '#6e7cb9',
+                  backgroundColor: '#059669',
                   height: '100%',
-                  width: `${(sessionProgress.reviewed_clips / sessionProgress.total_clips) * 100}%`,
+                  width: `${overallProgress ? (overallProgress.completed_strata_species / overallProgress.total_strata_species) * 100 : 0}%`,
                   transition: 'width 0.3s ease'
                 }}></div>
               </div>
             </div>
 
             {/* Counts section */}
-            <div style={{ display: 'flex', gap: '15px', fontSize: '0.875rem' }}>
+            <div style={{ display: 'flex', gap: '15px', fontSize: '0.9rem' }}>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontWeight: 'bold', color: '#6e7cb9' }}>{sessionProgress.validated_clips}</div>
+                <div style={{ fontSize: '0.75rem', color: '#666' }}>Total</div>
+              </div>
+              <div style={{ borderLeft: '1px solid #ddd', height: '24px', margin: 'auto 4px' }}></div>
               <div style={{ textAlign: 'center' }}>
                 <div style={{ fontWeight: 'bold', color: '#059669' }}>{sessionProgress.confirmed_clips}</div>
                 <div style={{ fontSize: '0.75rem', color: '#666' }}>Confirmed</div>

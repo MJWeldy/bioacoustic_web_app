@@ -248,29 +248,6 @@ class Audio_DB:
       self.populate_embedding_indices(indices)
       print(f"✓ Populated embedding indices for {num_clips} clips (0 to {num_clips-1})")
   
-  def populate_embedding_indices_by_order(self, embeddings_count: int):
-      """
-      Populate embedding indices based on clip order, handling cases where 
-      there might be fewer embeddings than clips.
-      
-      Args:
-          embeddings_count: Number of embeddings available
-      """
-      num_clips = len(self.clips_df)
-      
-      if embeddings_count >= num_clips:
-          # Enough embeddings for all clips
-          indices = list(range(num_clips))
-      else:
-          # Fewer embeddings than clips - assign to first N clips
-          indices = list(range(embeddings_count)) + [None] * (num_clips - embeddings_count)
-          print(f"Warning: Only {embeddings_count} embeddings for {num_clips} clips. "
-                f"Last {num_clips - embeddings_count} clips will have no embedding.")
-      
-      self.populate_embedding_indices(indices)
-      print(f"✓ Populated embedding indices: {embeddings_count} clips with embeddings, "
-            f"{num_clips - min(embeddings_count, num_clips)} without")
-  
   def update_class_scores_and_annotations(self, class_index: int):
       """
       Update the score and annotation columns based on a specific class index.

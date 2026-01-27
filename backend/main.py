@@ -1613,7 +1613,11 @@ def generate_spectrogram(request: SpectrogramRequest):
         
         # Load buffered audio
         audio = u.load_audio(request.file_path, (buffered_start, buffered_end, f.samplerate))
-        
+
+        # Convert stereo to mono if necessary
+        if len(audio.shape) > 1:
+            audio = np.mean(audio, axis=1)
+
         # Create spectrogram
         plt.figure(figsize=(12, 6))
         nyquist = cfg.MODEL_SR // 2
@@ -3190,6 +3194,34 @@ async def get_strata_species(strata_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def get_overall_validation_stats():
+    """Helper to calculate overall strata-level progress and total annotations"""
+    if app_state["validation_db"] is None:
+        return None
+    
+    db = app_state["validation_db"]
+    progress_df = db.validation_progress_df
+    
+    if len(progress_df) == 0:
+        return {
+            "total_strata_species": 0,
+            "completed_strata_species": 0,
+            "total_validated": len(db.validation_annotations_df)
+        }
+    
+    # A combination is completed if confirmed_clips >= target_confirmations
+    # OR if validated_clips == total_clips (all reviewed)
+    completed = progress_df.filter(
+        (pl.col("confirmed_clips") >= pl.col("target_confirmations")) |
+        (pl.col("validated_clips") == pl.col("total_clips"))
+    )
+    
+    return {
+        "total_strata_species": len(progress_df),
+        "completed_strata_species": len(completed),
+        "total_validated": len(db.validation_annotations_df)
+    }
+
 @app.post("/api/validation/start-session")
 async def start_validation_session(request: Request):
     """Start a validation session for a specific strata and species"""
@@ -3199,7 +3231,8 @@ async def start_validation_session(request: Request):
     species_name = body.get("species_name")
     validation_rules = body.get("validation_rules", {})
     review_mode = body.get("review_mode", False)
-    print(f"DEBUG: Request params - strata_id={strata_id}, species={species_name}, rules={validation_rules}, review_mode={review_mode}")
+    selection_strategy = body.get("selection_strategy", "top_down")
+    print(f"DEBUG: Request params - strata_id={strata_id}, species={species_name}, rules={validation_rules}, review_mode={review_mode}, strategy={selection_strategy}")
 
     if not strata_id or not species_name:
         raise HTTPException(status_code=400, detail="strata_id and species_name are required")
@@ -3292,8 +3325,20 @@ async def start_validation_session(request: Request):
                 predictions = predictions.filter(~pl.col("prediction_id").is_in(validated_ids))
                 print(f"DEBUG: Validation Mode - After excluding validated: {len(predictions)} (was {before_filter})")
             
-            # Sort by confidence (highest first) for systematic validation
-            predictions = predictions.sort("confidence", descending=True)
+            # Apply Selection Strategy
+            if selection_strategy == "random":
+                # Shuffle the predictions
+                # Polars sample with n=len(df) and shuffle=True is effectively a shuffle
+                predictions = predictions.sample(n=len(predictions), shuffle=True, seed=None)
+                print("DEBUG: Applied RANDOM selection strategy")
+            elif selection_strategy == "bottom_up":
+                # Sort by confidence (lowest first)
+                predictions = predictions.sort("confidence", descending=False)
+                print("DEBUG: Applied BOTTOM-UP selection strategy")
+            else:
+                # Default: Top-down (highest confidence first)
+                predictions = predictions.sort("confidence", descending=True)
+                print("DEBUG: Applied TOP-DOWN selection strategy")
 
         # Debug: Show confidence values of final results
         if len(predictions) > 0:
@@ -3313,7 +3358,8 @@ async def start_validation_session(request: Request):
         return {
             "status": "success",
             "validation_queue": predictions.to_dicts(),
-            "session_progress": progress_row
+            "session_progress": progress_row,
+            "overall_progress": get_overall_validation_stats()
         }
 
     except Exception as e:
@@ -3482,13 +3528,17 @@ async def submit_validation_annotation(request: Request):
                 return {
                     "status": "success",
                     "session_progress": updated_progress,
+                    "overall_progress": get_overall_validation_stats(),
                     "target_met": target_met
                 }
 
         # Auto-save after annotation (even if no progress tracking)
         validation_db.auto_save()
 
-        return {"status": "success"}
+        return {
+            "status": "success",
+            "overall_progress": get_overall_validation_stats()
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
