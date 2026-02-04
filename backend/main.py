@@ -1213,7 +1213,7 @@ async def annotate_clip(request: AnnotationRequest):
             clip_id = request.clip_id
         
         # Convert annotation value to semantic label
-        annotation_map = {0: "not_present", 1: "present", 2: "uncertain", 4: "not_reviewed"}
+        annotation_map = {0: "not_present", 1: "present", 3: "uncertain", 4: "not_reviewed"}
         label = annotation_map.get(request.annotation, "not_reviewed")
         
         # Get current class information
@@ -1271,7 +1271,7 @@ async def annotate_specific_class(request: MultiClassAnnotationRequest):
             clip_id = request.clip_id
 
         # Convert annotation value to semantic label
-        annotation_map = {0: "not_present", 1: "present", 2: "uncertain", 4: "not_reviewed"}
+        annotation_map = {0: "not_present", 1: "present", 3: "uncertain", 4: "not_reviewed"}
         label = annotation_map.get(request.annotation, "not_reviewed")
 
         # Get class information

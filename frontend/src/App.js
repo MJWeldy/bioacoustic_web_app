@@ -5,8 +5,10 @@ import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 
 import FunctionSidebar from './components/FunctionSidebar';
-import DatasetBuilder from './components/DatasetBuilder';
-import ActiveLearning from './components/ActiveLearning';
+//import DatasetBuilder from './components/DatasetBuilder';
+import DatasetBuilder from './components/DatasetBuilder_MUI';
+//import ActiveLearning from './components/ActiveLearning';
+import ActiveLearning from './components/ActiveLearning_MUI';
 import Evaluation from './components/Evaluation';
 import ModelTraining from './components/ModelTraining';
 import DatabaseViewer from './components/DatabaseViewer';
@@ -91,9 +93,7 @@ function App() {
             </TabPanel>
 
             <TabPanel>
-              <div style={{ display: currentTabIndex === 1 ? 'block' : 'none' }}>
-                <ValidationInterface />
-              </div>
+              <ValidationInterface isActive={currentTabIndex === 1} />
             </TabPanel>
 
             <TabPanel>

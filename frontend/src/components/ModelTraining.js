@@ -14,7 +14,7 @@ const ModelTraining = () => {
   // Training parameters
   const [nSteps, setNSteps] = useState(1000);
   const [batchSize, setBatchSize] = useState(128);
-  const [learningRate, setLearningRate] = useState(0.001);
+  const [learningRate, setLearningRate] = useState(0.01);
   const [modelType, setModelType] = useState(2);
   const [verbose, setVerbose] = useState(true);
   const [weakNegWeight, setWeakNegWeight] = useState(0.05);
@@ -25,7 +25,7 @@ const ModelTraining = () => {
   const [lrRedux, setLrRedux] = useState(0.5);
   const [patience, setPatience] = useState(5000);
   const [lrReducePatience, setLrReducePatience] = useState(1000);
-  const [metricForTracking, setMetricForTracking] = useState('cmap');  // 'cmap' or 'auc'
+  const [metricForTracking, setMetricForTracking] = useState('loss');  // 'cmap', 'auc', 'geomean', or 'loss'
 
   const [isLoading, setIsLoading] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState(null);

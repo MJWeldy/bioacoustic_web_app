@@ -883,11 +883,11 @@ class Audio_DB:
       """Add or update an annotation for a specific clip and class."""
       import uuid
       from datetime import datetime
-      
+
       print(f"DEBUG: add_annotation called with clip_id={clip_id}, class_name={class_name}, label={label}")
       print(f"DEBUG: Current annotations_df columns: {self.annotations_df.columns}")
       print(f"DEBUG: Current annotations_df schema: {self.annotations_df.schema}")
-      
+
       try:
           # Remove existing annotation for this clip and class
           print(f"DEBUG: Current annotations_df length: {len(self.annotations_df)}")
@@ -895,22 +895,53 @@ class Audio_DB:
               ~((pl.col("clip_id") == clip_id) & (pl.col("class_name") == class_name))
           )
           print(f"DEBUG: After filtering, annotations_df length: {len(self.annotations_df)}")
-          
+
           # Add new annotation - match the existing schema
           new_annotation = pl.DataFrame({
               "annotation_id": [str(uuid.uuid4())],
               "clip_id": [clip_id],
-              "class_name": [class_name], 
+              "class_name": [class_name],
               "label": [label],
               "annotated_at": [datetime.now()]
           })
-          
+
           print(f"DEBUG: Created new annotation DataFrame with {len(new_annotation)} rows")
           print(f"DEBUG: New annotation columns: {new_annotation.columns}")
           print(f"DEBUG: New annotation schema: {new_annotation.schema}")
           self.annotations_df = pl.concat([self.annotations_df, new_annotation])
           print(f"DEBUG: Final annotations_df length: {len(self.annotations_df)}")
-          
+
+          # Update annotation_status in clips_df to reflect the annotation
+          # Map label to annotation status value
+          label_to_status = {
+              "present": 1,
+              "not_present": 0,
+              "uncertain": 3,
+              "not_reviewed": 4
+          }
+          annotation_status_value = label_to_status.get(label, 4)
+
+          # Get the class index
+          class_names = list(self.get_class_names())
+          if class_name in class_names:
+              class_index = class_names.index(class_name)
+
+              # Get current annotation_status arrays
+              current_annotations = self.clips_df['annotation_status'].to_list()
+
+              # Find the clip and update its annotation_status for this class
+              clip_indices = self.clips_df.with_row_index().filter(pl.col("clip_id") == clip_id)['index'].to_list()
+
+              for i in clip_indices:
+                  if i < len(current_annotations):
+                      current_annotations[i][class_index] = annotation_status_value
+
+              # Update the clips dataframe
+              self.clips_df = self.clips_df.with_columns([
+                  pl.Series(current_annotations).alias('annotation_status')
+              ])
+              print(f"DEBUG: Updated annotation_status for clip {clip_id}, class_index {class_index} to {annotation_status_value}")
+
       except Exception as e:
           print(f"ERROR in add_annotation: {e}")
           raise
