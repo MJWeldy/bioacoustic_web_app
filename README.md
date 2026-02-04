@@ -53,9 +53,12 @@ A web-based application for building datasets and performing active learning in 
 ✅ **Clean Architecture** - Organized FastAPI backend + React frontend structure  
 
 **Recent Achievements:**
+- ✅ **Material-UI Modernization**: New dashboard-style components with clean, minimal design
+- ✅ **Comprehensive Test Suite**: 93 test functions covering all backend components with full mocking
+- ✅ **Annotation System Fixes**: Corrected uncertain label mapping (value 3) and enhanced database tracking
 - ✅ **Fixed Critical Backend Issues**: Resolved all 500 errors in multiclass annotation system
 - ✅ **Enhanced Setup Process**: Now works for first-time users without existing environments
-- ✅ **Comprehensive Diagnostics**: Added health check, test, and reset utilities  
+- ✅ **Comprehensive Diagnostics**: Added health check, test, and reset utilities
 - ✅ **Robust Error Handling**: Improved validation and error reporting across all endpoints
 - ✅ **First-Time User Support**: Complete setup from scratch using environment.yml
 - ✅ **Process Management**: Reliable startup/shutdown with health monitoring
@@ -123,6 +126,44 @@ A web-based application for building datasets and performing active learning in 
 - **RESTful API**: Comprehensive FastAPI backend with automatic documentation
 - **Flexible Architecture**: Easily extensible for new models and annotation types
 
+### 🎨 **Modern UI Development (In Progress)**
+- **Material-UI Dashboard**: New dashboard-style interface with clean, minimal design
+  - Light grey sidebar with white content areas
+  - Dashboard-style metric cards and compact form layouts
+  - Clean borders without shadows for professional appearance
+- **Modernized Components**: New MUI versions of all major components
+  - `App_Dashboard.js`: Modern dashboard shell with GitHub integration
+  - `DatasetBuilder_MUI.js`: Two-column layout with configuration and instructions
+  - `ActiveLearning_MUI.js`, `ModelTraining_MUI.js`, `Evaluation_MUI.js`: Full MUI implementations
+  - Additional validation and database viewer components
+- **Implementation Guides**: Comprehensive documentation for UI modernization
+  - `COMPONENT_MODERNIZATION_GUIDE.md`: Component migration roadmap
+  - `DASHBOARD_IMPLEMENTATION.md`: Dashboard design specifications
+  - `MODERNIZATION_GUIDE.md`: Overall modernization strategy
+
+### 🧪 **Comprehensive Testing Framework**
+- **93 Test Functions**: Complete test coverage of all backend components
+- **Test-Driven Development**: Following TDD principles with comprehensive mocking
+- **Test Categories**:
+  - Unit tests for individual modules (database, utilities, classifier, config)
+  - Integration tests for API endpoints and workflows
+  - Fast tests for quick validation during development
+- **Test Runner**: Advanced test runner with filtering and verbosity control
+  ```bash
+  # Run all tests
+  /home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --verbose
+
+  # Run specific categories
+  /home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --unit
+  /home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --integration
+  /home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --fast
+
+  # Test specific modules
+  /home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --module database
+  ```
+- **Minimal Dependencies**: Testing infrastructure built with minimal external dependencies
+- **Full Mocking**: All external dependencies properly mocked for isolated testing
+
 ## Architecture
 
 ### Backend (FastAPI)
@@ -135,10 +176,22 @@ A web-based application for building datasets and performing active learning in 
   - **config.py**: Configuration for different backend models
 
 ### Frontend (React)
-- **App.js**: Main application with tabbed interface and global styling
-- **components/DatasetBuilder.js**: Interface for creating new datasets
-- **components/ActiveLearning.js**: Interactive annotation interface
-- Modern React with hooks, responsive design, and real-time updates
+- **App.js**: Main application with tabbed interface and global styling (classic version)
+- **App_Dashboard.js**: Modern dashboard with sidebar navigation (Material-UI version)
+- **components/** (Classic Versions):
+  - **DatasetBuilder.js**: Interface for creating new datasets
+  - **ActiveLearning.js**: Interactive annotation interface
+  - **ModelTraining.js**: Model training interface
+  - **Evaluation.js**: Evaluation interface
+  - **DatabaseViewer.js**: Database exploration interface
+- **components/** (Material-UI Versions):
+  - **DatasetBuilder_MUI.js**: Modernized dataset builder with dashboard cards
+  - **ActiveLearning_MUI.js**: MUI-based annotation interface
+  - **ModelTraining_MUI.js**: MUI-based training interface
+  - **Evaluation_MUI.js**: MUI-based evaluation interface
+  - **DatabaseViewer_MUI.js**: MUI-based database viewer
+  - **Validation components**: ValidationDatasetBuilder_MUI.js, ValidationInterface_MUI.js, ValidationViewer_MUI.js
+- Modern React with hooks, responsive design, real-time updates, and dual UI implementations
 
 ## Cross-Platform Compatibility
 
@@ -345,26 +398,36 @@ cd frontend && npm start
 
 The application supports the same backend models as the original notebook:
 
-- **PERCH**: Google's PERCH model v8 for bird vocalizations
-- **BirdNET_2.4**: BirdNET 2.4 model 
-- **PNWCnet**: Pacific Northwest focused model
-- **PNWCnet_EXPANDED**: Expanded version with broader frequency range
+- **PERCH**: Google's PERCH model v8 for bird vocalizations (60-12000 Hz frequency range)
+- **PERCH_IGNORE_SR**: PERCH variant ignoring sample rate constraints
+- **BirdNET_2.4**: BirdNET 2.4 model
+- **PNWCnet**: Pacific Northwest focused model (0-12000 Hz frequency range)
+- **PNWCnet_EXPANDED**: Expanded version with broader frequency range (0-12000 Hz)
 
-Model-specific parameters (sample rates, context frames, etc.) are automatically configured based on the selected backend.
+Model-specific parameters (sample rates, context frames, frequency ranges, etc.) are automatically configured based on the selected backend. See `backend/modules/config.py` for detailed model configurations.
 
 ## File Structure
 
 ```
 bioacoustics_web_app/
-├── setup.sh                  # Linux installation script
-├── setup_macos.sh            # macOS installation script  
-├── setup.bat                 # Windows installation script
-├── run_dev.sh               # Linux/macOS startup script
-├── run_dev.bat              # Windows startup script
-├── test_installation.sh     # Verify installation (Linux/macOS)
-├── README.md                # Project documentation
-├── DEVELOPMENT_LOG.md       # Complete development history
-├── active_learning_loop.ipynb # Original Jupyter notebook
+├── setup.sh                            # Linux installation script
+├── setup_macos.sh                      # macOS installation script
+├── setup.bat                           # Windows installation script
+├── run_dev.sh                          # Linux/macOS startup script
+├── run_dev.bat                         # Windows startup script
+├── test_installation.sh                # Verify installation (Linux/macOS)
+├── health_check.sh                     # Comprehensive system validation (22 tests)
+├── test_setup.sh                       # Quick package verification
+├── reset.sh                            # Clean up stuck processes/ports
+├── run_tests.py                        # Test runner with 93 test functions
+├── README.md                           # Project documentation
+├── CLAUDE.md                           # AI assistant development guide
+├── DEVELOPMENT_LOG.md                  # Complete development history
+├── COMPONENT_MODERNIZATION_GUIDE.md    # UI modernization roadmap
+├── DASHBOARD_IMPLEMENTATION.md         # Dashboard design specifications
+├── MODERNIZATION_GUIDE.md              # Overall modernization strategy
+├── active_learning_loop.ipynb          # Original Jupyter notebook
+├── environment.yml                     # Conda environment specification
 ├── backend/
 │   ├── main.py               # FastAPI application with all endpoints
 │   ├── requirements.txt      # Python dependencies (legacy)
@@ -377,22 +440,31 @@ bioacoustics_web_app/
 │       ├── display.py        # Original Jupyter display module
 │       └── display_web.py    # Web-compatible annotation interface
 ├── frontend/
-│   ├── package.json          # Node.js dependencies and scripts
-│   ├── package-lock.json     # Dependency lock file
+│   ├── package.json                    # Node.js dependencies and scripts
+│   ├── package-lock.json               # Dependency lock file
 │   ├── public/
-│   │   └── index.html        # HTML template
-│   ├── node_modules/         # Installed dependencies
+│   │   └── index.html                  # HTML template
+│   ├── node_modules/                   # Installed dependencies
 │   └── src/
-│       ├── index.js          # React application entry point
-│       ├── index.css         # Global styles
-│       ├── App.js            # Main application with tabs
-│       ├── App.css           # Application-specific styles
+│       ├── index.js                    # React application entry point
+│       ├── index.css                   # Global styles
+│       ├── App.js                      # Main application with tabs (classic)
+│       ├── App_Dashboard.js            # Modern dashboard interface (MUI)
+│       ├── App.css                     # Application-specific styles
 │       └── components/
-│           ├── DatasetBuilder.js  # Dataset creation interface
-│           ├── ActiveLearning.js  # Interactive annotation interface
-│           ├── ModelTraining.js   # Model training interface
-│           ├── Evaluation.js      # Model evaluation interface
-│           └── DatabaseViewer.js  # Database exploration interface
+│           ├── DatasetBuilder.js           # Dataset creation interface (classic)
+│           ├── DatasetBuilder_MUI.js       # Dataset builder (MUI)
+│           ├── ActiveLearning.js           # Interactive annotation interface (classic)
+│           ├── ActiveLearning_MUI.js       # Active learning (MUI)
+│           ├── ModelTraining.js            # Model training interface (classic)
+│           ├── ModelTraining_MUI.js        # Model training (MUI)
+│           ├── Evaluation.js               # Model evaluation interface (classic)
+│           ├── Evaluation_MUI.js           # Evaluation (MUI)
+│           ├── DatabaseViewer.js           # Database exploration interface (classic)
+│           ├── DatabaseViewer_MUI.js       # Database viewer (MUI)
+│           ├── ValidationDatasetBuilder_MUI.js  # Validation dataset builder (MUI)
+│           ├── ValidationInterface_MUI.js       # Validation interface (MUI)
+│           └── ValidationViewer_MUI.js          # Validation viewer (MUI)
 ├── logs/                     # Runtime logs (created automatically)
 │   ├── backend.log           # FastAPI server logs
 │   └── frontend.log          # React development server logs
@@ -495,6 +567,31 @@ def bce_loss(y_true, logits, is_labeled_mask, weak_neg_weight=0.05):
 - Training handles partial annotations (some classes reviewed, others not)
 - Uncertain annotations become weak positive labels with reduced influence
 
+## Recent Improvements and Bug Fixes
+
+### Database Enhancements
+- **Annotation Status Tracking**: Clips now maintain accurate annotation status arrays that reflect all class annotations
+- **Automatic Status Updates**: When annotations are added, the corresponding annotation_status values are automatically updated
+- **Class Index Mapping**: Proper mapping between class names and their indices in status arrays
+- **Improved Data Integrity**: Better synchronization between annotations table and clips table
+
+### Annotation System Fixes
+- **Correct Uncertain Label Mapping**: Fixed annotation value mapping where uncertain labels now correctly use value 3
+  - Previous mapping: `{0: "not_present", 1: "present", 2: "uncertain", 4: "not_reviewed"}`
+  - Corrected mapping: `{0: "not_present", 1: "present", 3: "uncertain", 4: "not_reviewed"}`
+- **Consistent Label Values**: Ensures annotation values are consistent across the entire system
+- **Multi-endpoint Fix**: Applied correction to both `/api/active-learning/annotate` and `/api/active-learning/annotate-class` endpoints
+
+### Configuration Updates
+- **PERCH Frequency Range**: Adjusted MAX_FREQ from 10000 Hz to 12000 Hz for better high-frequency coverage
+- **Config File Cleanup**: Added proper newline at end of config.py for cleaner git diffs
+
+### Frontend Modernization
+- **Material-UI Integration**: Added @mui/material, @mui/icons-material, and @emotion packages
+- **Dashboard Architecture**: New App_Dashboard.js with sidebar navigation and modern layout
+- **Component Library**: Complete set of MUI-modernized components for all major features
+- **Design System**: Consistent styling with dashboard cards, clean borders, and minimal shadows
+
 ## Development and Customization
 
 ### Adding New Backend Models
@@ -516,10 +613,36 @@ def bce_loss(y_true, logits, is_labeled_mask, weak_neg_weight=0.05):
 - **Audio**: Optimize clip loading and spectrogram generation
 
 ### Testing
-```bash
-# Test the installation
-./test_installation.sh
 
+**System Validation:**
+```bash
+# Comprehensive system validation (22 health checks)
+./health_check.sh
+
+# Quick package verification
+./test_setup.sh
+
+# Clean up stuck processes/ports
+./reset.sh
+```
+
+**Backend Test Suite (93 tests):**
+```bash
+# Run all tests with verbose output
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --verbose
+
+# Run specific test categories
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --unit        # Unit tests only
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --integration # Integration tests only
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --fast        # Quick validation tests
+
+# Test specific modules
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --module database
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --module classifier
+```
+
+**Service Health Checks:**
+```bash
 # Check services are running
 curl http://localhost:8000/docs  # API documentation
 curl http://localhost:3000       # Frontend application
@@ -533,6 +656,23 @@ curl http://localhost:3000       # Frontend application
 - **Permission denied on scripts**: Run `chmod +x setup.sh run_dev.sh`
 - **active_learning environment missing**: Set up original notebook first
 
+### Quick Diagnostics
+
+**First Steps for Any Issue:**
+```bash
+# Run comprehensive health checks (22 tests)
+./health_check.sh
+
+# Clean up stuck processes/ports
+./reset.sh
+
+# Verify package installation
+./test_setup.sh
+
+# Run backend tests
+/home/matt/miniconda3/envs/bioacoustics-web-app/bin/python run_tests.py --fast
+```
+
 ### Common Issues and Solutions
 
 #### Backend Won't Start
@@ -545,6 +685,9 @@ python -c "from modules import config; print('✓ Modules working')"
 
 # Check for port conflicts
 lsof -i :8000
+
+# Run health check for detailed diagnostics
+./health_check.sh
 ```
 
 #### Frontend Build Errors
