@@ -714,7 +714,7 @@ class ValidationDB:
                                audio_directory: str,
                                clip_window_length: float,
                                target_classes: List[str],
-                               strata_column: str = None,
+                               strata_file: str = None,
                                replace_existing: bool = False) -> Dict[str, Any]:
         """
         Load unvalidated clips by subdividing audio files into fixed-length windows.
@@ -724,7 +724,7 @@ class ValidationDB:
             audio_directory: Directory containing audio files
             clip_window_length: Length of each clip window in seconds
             target_classes: List of target class names for validation
-            strata_column: Optional strata grouping (extracted from filename)
+            strata_file: Optional path to CSV file with 'filename' and 'strata' columns
             replace_existing: If True, clear existing predictions before loading
 
         Returns:
@@ -754,6 +754,26 @@ class ValidationDB:
             if not audio_dir.exists():
                 raise ValueError(f"Audio directory not found: {audio_directory}")
 
+            # Load strata mapping from CSV if provided
+            strata_mapping = {}
+            if strata_file and strata_file.strip():
+                strata_path = Path(strata_file)
+                if not strata_path.exists():
+                    raise ValueError(f"Strata file not found: {strata_file}")
+
+                print(f"DEBUG: Loading strata mapping from {strata_file}")
+                strata_df = pl.read_csv(strata_file)
+
+                # Validate required columns
+                if 'filename' not in strata_df.columns or 'strata' not in strata_df.columns:
+                    raise ValueError("Strata CSV must contain 'filename' and 'strata' columns")
+
+                # Create filename -> strata mapping
+                for row in strata_df.iter_rows(named=True):
+                    strata_mapping[row['filename']] = row['strata']
+
+                print(f"DEBUG: Loaded strata mapping for {len(strata_mapping)} files")
+
             # Find all audio files
             audio_extensions = ['.wav', '.mp3', '.flac', '.aiff', '.m4a', '.ogg']
             audio_files = []
@@ -769,6 +789,7 @@ class ValidationDB:
             parsed_data = []
             failed_files = []
             total_clips = 0
+            unmapped_files = []
 
             for audio_file in audio_files:
                 try:
@@ -781,12 +802,15 @@ class ValidationDB:
                     num_clips = int(np.ceil(duration / clip_window_length))
                     total_clips += num_clips
 
-                    # Extract strata if specified
+                    # Get strata value from mapping or use default
                     strata_value = 'all_data'
-                    if strata_column:
-                        # Try to extract strata from filename (basic implementation)
-                        # User can customize this logic based on their filename format
-                        strata_value = strata_column  # Default to column name if no parsing
+                    if strata_mapping:
+                        if filename in strata_mapping:
+                            strata_value = strata_mapping[filename]
+                        else:
+                            # Track unmapped files for warning
+                            unmapped_files.append(filename)
+                            strata_value = 'unmapped'
 
                     # Create clips for each target class
                     for clip_idx in range(num_clips):
@@ -854,7 +878,12 @@ class ValidationDB:
             unique_strata = len(predictions_new['strata'].unique())
             strata_list = sorted(predictions_new['strata'].unique().to_list())
 
-            return {
+            # Warn about unmapped files if any
+            if unmapped_files:
+                print(f"WARNING: {len(unmapped_files)} files not found in strata mapping. Using 'unmapped' as strata.")
+                print(f"Unmapped files: {unmapped_files[:10]}{'...' if len(unmapped_files) > 10 else ''}")
+
+            result = {
                 'status': 'success',
                 'total_predictions': total_predictions,
                 'total_clips': total_clips,
@@ -869,6 +898,13 @@ class ValidationDB:
                 'failed_files': len(failed_files),
                 'clip_window_length': clip_window_length
             }
+
+            # Add unmapped files warning if applicable
+            if unmapped_files:
+                result['unmapped_files'] = len(unmapped_files)
+                result['unmapped_files_list'] = unmapped_files[:20]  # Return first 20 for display
+
+            return result
 
         except Exception as e:
             return {

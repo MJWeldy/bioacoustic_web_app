@@ -3032,7 +3032,7 @@ async def load_unvalidated_clips(request: Request):
     audio_directory = body.get("audio_directory")
     clip_window_length = body.get("clip_window_length", 3.0)
     target_classes = body.get("target_classes", [])
-    strata_column = body.get("strata_column")
+    strata_file = body.get("strata_file")  # Changed from strata_column to strata_file
     replace_existing = body.get("replace_existing", True)
     save_location = body.get("save_location")  # User's specified save location
 
@@ -3055,7 +3055,7 @@ async def load_unvalidated_clips(request: Request):
             audio_directory=audio_directory,
             clip_window_length=clip_window_length,
             target_classes=target_classes,
-            strata_column=strata_column,
+            strata_file=strata_file,  # Changed from strata_column to strata_file
             replace_existing=False  # We already cleared at the DB level if needed
         )
 

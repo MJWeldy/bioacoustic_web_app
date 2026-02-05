@@ -14,7 +14,7 @@ const ValidationDatasetBuilder = () => {
   const [audioDirectory, setAudioDirectory] = useState('');
   const [clipWindowLength, setClipWindowLength] = useState(3.0);
   const [targetClasses, setTargetClasses] = useState('');
-  const [strataColumn, setStrataColumn] = useState('');
+  const [strataFile, setStrataFile] = useState('');
 
   // Workflow 2 & 3: Prediction Sets (Standard and PNW-CNet)
   const [predictionsFile, setPredictionsFile] = useState('');
@@ -85,7 +85,7 @@ const ValidationDatasetBuilder = () => {
           audio_directory: audioDirectory,
           clip_window_length: clipWindowLength,
           target_classes: targetClasses.split(',').map(c => c.trim()).filter(c => c),
-          strata_column: strataColumn.trim() || null,
+          strata_file: strataFile.trim() || null,
           save_location: saveLocation.trim() || null
         });
 
@@ -158,6 +158,11 @@ const ValidationDatasetBuilder = () => {
         setLoadSummary(response.data);
         const itemCount = response.data.total_predictions || response.data.total_clips || 0;
         toast.success(`Loaded ${itemCount} items successfully`);
+
+        // Show warning about unmapped files if any
+        if (response.data.unmapped_files && response.data.unmapped_files > 0) {
+          toast.warning(`⚠️ ${response.data.unmapped_files} audio files not found in strata mapping. These will use 'unmapped' as strata.`, { autoClose: 8000 });
+        }
 
         // Show auto-save notification if project was auto-saved
         if (response.data.auto_saved && response.data.project_path) {
@@ -491,14 +496,14 @@ const ValidationDatasetBuilder = () => {
             </div>
 
             <div className="form-group">
-              <label htmlFor="strataColumn">Strata Grouping (Optional)</label>
+              <label htmlFor="strataFile">Strata Metadata File (Optional)</label>
               <input
                 type="text"
-                id="strataColumn"
+                id="strataFile"
                 className="form-control"
-                placeholder="site, location, date, etc."
-                value={strataColumn}
-                onChange={(e) => setStrataColumn(e.target.value)}
+                placeholder="/path/to/strata.csv"
+                value={strataFile}
+                onChange={(e) => setStrataFile(e.target.value)}
                 disabled={isLoading}
               />
               <small style={{ color: '#666', fontSize: '0.875rem' }}>

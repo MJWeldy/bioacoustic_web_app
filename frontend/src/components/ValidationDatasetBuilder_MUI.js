@@ -45,7 +45,7 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
   const [audioDirectory, setAudioDirectory] = useState('');
   const [clipWindowLength, setClipWindowLength] = useState(3.0);
   const [targetClasses, setTargetClasses] = useState('');
-  const [strataColumn, setStrataColumn] = useState('');
+  const [strataFile, setStrataFile] = useState('');
 
   // Workflow 2: Prediction Sets (Standard)
   const [predictionsFile, setPredictionsFile] = useState('');
@@ -102,7 +102,7 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
           audio_directory: audioDirectory,
           clip_window_length: clipWindowLength,
           target_classes: targetClasses.split(',').map(c => c.trim()).filter(c => c),
-          strata_column: strataColumn.trim() || null,
+          strata_file: strataFile.trim() || null,
           save_location: saveLocation.trim() || null
         });
 
@@ -134,6 +134,11 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
         setLoadSummary(response.data);
         const itemCount = response.data.total_predictions || response.data.total_clips || 0;
         toast.success(`Loaded ${itemCount} items successfully`);
+
+        // Show warning about unmapped files if any
+        if (response.data.unmapped_files && response.data.unmapped_files > 0) {
+          toast.warning(`⚠️ ${response.data.unmapped_files} audio files not found in strata mapping. These will use 'unmapped' as strata.`, { autoClose: 8000 });
+        }
 
         // Show auto-save notification if project was auto-saved
         if (response.data.auto_saved && response.data.project_path) {
@@ -361,12 +366,13 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
               <Grid item xs={12} md={6}>
                 <TextField
                   fullWidth size="small"
-                  label="Strata Grouping (Optional)"
-                  placeholder="site, location, date, etc."
-                  value={strataColumn}
-                  onChange={(e) => setStrataColumn(e.target.value)}
+                  label="Strata Metadata File (Optional)"
+                  placeholder="/path/to/strata.csv"
+                  value={strataFile}
+                  onChange={(e) => setStrataFile(e.target.value)}
                   disabled={isLoading}
-                  helperText="Metadata field to group clips by"
+                  helperText="CSV file with 'filename' and 'strata' columns"
+                  InputProps={{ startAdornment: <FileIcon sx={{ mr: 1, color: 'text.secondary' }} /> }}
                 />
               </Grid>
             </Grid>
