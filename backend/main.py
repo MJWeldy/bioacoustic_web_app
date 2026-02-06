@@ -3337,6 +3337,10 @@ async def start_validation_session(request: Request):
                 # Sort by confidence (lowest first)
                 predictions = predictions.sort("confidence", descending=False)
                 print("DEBUG: Applied BOTTOM-UP selection strategy")
+            elif selection_strategy == "sequential":
+                # Sort by filename and start_time for sequential clip ordering
+                predictions = predictions.sort(["filename", "start_time"])
+                print("DEBUG: Applied SEQUENTIAL selection strategy")
             else:
                 # Default: Top-down (highest confidence first)
                 predictions = predictions.sort("confidence", descending=True)

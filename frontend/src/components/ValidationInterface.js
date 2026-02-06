@@ -715,8 +715,9 @@ const ValidationInterface = () => {
               disabled={isLoading}
             >
               <option value="top_down">Top-Down (High Conf.)</option>
-              <option value="random">Random (Shuffle)</option>
               <option value="bottom_up">Bottom-Up (Low Conf.)</option>
+              <option value="sequential">Sequential (Time Order)</option>
+              <option value="random">Random (Shuffle)</option>
             </select>
           </div>
 

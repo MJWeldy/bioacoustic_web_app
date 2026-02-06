@@ -555,8 +555,9 @@ const ValidationInterface = ({ isActive = true }) => {
                             <FormControl size="small" fullWidth>
                                 <InputLabel>Strategy</InputLabel>
                                 <Select value={selectionStrategy} label="Strategy" onChange={(e) => setSelectionStrategy(e.target.value)}>
-                                    <MenuItem value="top_down">Top-Down</MenuItem>
-                                    <MenuItem value="bottom_up">Bottom-Up</MenuItem>
+                                    <MenuItem value="top_down">Top-Down (Confidence)</MenuItem>
+                                    <MenuItem value="bottom_up">Bottom-Up (Confidence)</MenuItem>
+                                    <MenuItem value="sequential">Sequential (Time Order)</MenuItem>
                                     <MenuItem value="random">Random</MenuItem>
                                 </Select>
                             </FormControl>
