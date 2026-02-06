@@ -46,6 +46,7 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
   const [clipWindowLength, setClipWindowLength] = useState(3.0);
   const [targetClasses, setTargetClasses] = useState('');
   const [strataFile, setStrataFile] = useState('');
+  const [useFilenameAsStrata, setUseFilenameAsStrata] = useState(false);
 
   // Workflow 2: Prediction Sets (Standard)
   const [predictionsFile, setPredictionsFile] = useState('');
@@ -103,6 +104,7 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
           clip_window_length: clipWindowLength,
           target_classes: targetClasses.split(',').map(c => c.trim()).filter(c => c),
           strata_file: strataFile.trim() || null,
+          use_filename_as_strata: useFilenameAsStrata,
           save_location: saveLocation.trim() || null
         });
 
@@ -370,9 +372,26 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
                   placeholder="/path/to/strata.csv"
                   value={strataFile}
                   onChange={(e) => setStrataFile(e.target.value)}
-                  disabled={isLoading}
+                  disabled={isLoading || useFilenameAsStrata}
                   helperText="CSV file with 'filename' and 'strata' columns"
                   InputProps={{ startAdornment: <FileIcon sx={{ mr: 1, color: 'text.secondary' }} /> }}
+                />
+              </Grid>
+              <Grid item xs={12}>
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      checked={useFilenameAsStrata}
+                      onChange={(e) => {
+                        setUseFilenameAsStrata(e.target.checked);
+                        if (e.target.checked) {
+                          setStrataFile(''); // Clear strata file when using filename
+                        }
+                      }}
+                      disabled={isLoading}
+                    />
+                  }
+                  label="Use audio filename as strata (keeps clips from each file sequential)"
                 />
               </Grid>
             </Grid>

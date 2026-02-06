@@ -715,6 +715,7 @@ class ValidationDB:
                                clip_window_length: float,
                                target_classes: List[str],
                                strata_file: str = None,
+                               use_filename_as_strata: bool = False,
                                replace_existing: bool = False) -> Dict[str, Any]:
         """
         Load unvalidated clips by subdividing audio files into fixed-length windows.
@@ -725,6 +726,7 @@ class ValidationDB:
             clip_window_length: Length of each clip window in seconds
             target_classes: List of target class names for validation
             strata_file: Optional path to CSV file with 'filename' and 'strata' columns
+            use_filename_as_strata: If True, use audio filename as strata (keeps clips sequential per file)
             replace_existing: If True, clear existing predictions before loading
 
         Returns:
@@ -802,9 +804,14 @@ class ValidationDB:
                     num_clips = int(np.ceil(duration / clip_window_length))
                     total_clips += num_clips
 
-                    # Get strata value from mapping or use default
-                    strata_value = 'all_data'
-                    if strata_mapping:
+                    # Determine strata value based on options
+                    strata_value = 'all_data'  # Default
+
+                    if use_filename_as_strata:
+                        # Use the filename itself as the strata (keeps clips sequential per file)
+                        strata_value = filename
+                    elif strata_mapping:
+                        # Use mapping from CSV file
                         if filename in strata_mapping:
                             strata_value = strata_mapping[filename]
                         else:

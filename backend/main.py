@@ -3033,6 +3033,7 @@ async def load_unvalidated_clips(request: Request):
     clip_window_length = body.get("clip_window_length", 3.0)
     target_classes = body.get("target_classes", [])
     strata_file = body.get("strata_file")  # Changed from strata_column to strata_file
+    use_filename_as_strata = body.get("use_filename_as_strata", False)
     replace_existing = body.get("replace_existing", True)
     save_location = body.get("save_location")  # User's specified save location
 
@@ -3056,6 +3057,7 @@ async def load_unvalidated_clips(request: Request):
             clip_window_length=clip_window_length,
             target_classes=target_classes,
             strata_file=strata_file,  # Changed from strata_column to strata_file
+            use_filename_as_strata=use_filename_as_strata,
             replace_existing=False  # We already cleared at the DB level if needed
         )
 

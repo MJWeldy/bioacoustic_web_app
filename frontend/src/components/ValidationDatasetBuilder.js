@@ -15,6 +15,7 @@ const ValidationDatasetBuilder = () => {
   const [clipWindowLength, setClipWindowLength] = useState(3.0);
   const [targetClasses, setTargetClasses] = useState('');
   const [strataFile, setStrataFile] = useState('');
+  const [useFilenameAsStrata, setUseFilenameAsStrata] = useState(false);
 
   // Workflow 2 & 3: Prediction Sets (Standard and PNW-CNet)
   const [predictionsFile, setPredictionsFile] = useState('');
@@ -86,6 +87,7 @@ const ValidationDatasetBuilder = () => {
           clip_window_length: clipWindowLength,
           target_classes: targetClasses.split(',').map(c => c.trim()).filter(c => c),
           strata_file: strataFile.trim() || null,
+          use_filename_as_strata: useFilenameAsStrata,
           save_location: saveLocation.trim() || null
         });
 
@@ -504,11 +506,29 @@ const ValidationDatasetBuilder = () => {
                 placeholder="/path/to/strata.csv"
                 value={strataFile}
                 onChange={(e) => setStrataFile(e.target.value)}
-                disabled={isLoading}
+                disabled={isLoading || useFilenameAsStrata}
               />
               <small style={{ color: '#666', fontSize: '0.875rem' }}>
-                Optional strata field for grouping (extracted from filename or metadata)
+                CSV file with 'filename' and 'strata' columns
               </small>
+            </div>
+
+            <div className="form-group" style={{ marginTop: '1rem' }}>
+              <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', fontWeight: 'normal' }}>
+                <input
+                  type="checkbox"
+                  checked={useFilenameAsStrata}
+                  onChange={(e) => {
+                    setUseFilenameAsStrata(e.target.checked);
+                    if (e.target.checked) {
+                      setStrataFile(''); // Clear strata file when using filename
+                    }
+                  }}
+                  disabled={isLoading}
+                  style={{ marginRight: '8px' }}
+                />
+                Use audio filename as strata (keeps clips from each file sequential)
+              </label>
             </div>
           </div>
 
