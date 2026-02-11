@@ -1293,12 +1293,19 @@ class ValidationDB:
         try:
             base_dir = Path(base_path)
 
-            # Validate path
+            # Validate path (cross-platform)
             if not base_dir.is_absolute():
+                import platform
+                system = platform.system()
+                if system == "Windows":
+                    example = "C:\\Users\\YourName\\validation_projects"
+                else:
+                    example = "/home/user/validation_projects"
+
                 raise ValueError(
-                    f"Save location must be an absolute path starting with '/'\n"
+                    f"Save location must be an absolute path\n"
                     f"You provided: {base_path}\n"
-                    f"Example: /home/user/validation_projects"
+                    f"Example for {system}: {example}"
                 )
 
             # Create directory with better error handling

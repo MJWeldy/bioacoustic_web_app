@@ -59,11 +59,16 @@ const ValidationDatasetBuilder = () => {
     setIsLoading(true);
     setLoadSummary(null);
 
-    // Validate save location if provided
-    if (saveLocation.trim() && !saveLocation.trim().startsWith('/')) {
-      toast.error('❌ Save location must be an absolute path starting with "/" (e.g., /home/user/projects)', { autoClose: 8000 });
-      setIsLoading(false);
-      return;
+    // Validate save location if provided (cross-platform absolute path check)
+    if (saveLocation.trim()) {
+      const path = saveLocation.trim();
+      // Check for absolute paths: Unix/Mac (/...) or Windows (C:\... or C:/...)
+      const isAbsolute = path.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(path);
+      if (!isAbsolute) {
+        toast.error('❌ Save location must be an absolute path:\n• Windows: C:\\projects or C:/projects\n• Mac/Linux: /home/user/projects', { autoClose: 8000 });
+        setIsLoading(false);
+        return;
+      }
     }
 
     try {
