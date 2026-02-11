@@ -95,15 +95,15 @@ if %errorlevel% equ 0 (
 :install_missing_packages
 REM Install any missing web packages (if environment was cloned)
 echo Checking for missing web framework packages...
-call conda activate bioacoustics-web-app
 
-REM Check if FastAPI is already installed
-python -c "import fastapi" >nul 2>&1
+REM Use conda run to execute commands in the environment without full activation
+REM This is more reliable in batch script contexts
+conda run -n bioacoustics-web-app python -c "import fastapi" >nul 2>&1
 if %errorlevel% equ 0 (
     echo ✓ Web framework packages already available
 ) else (
     echo Installing missing web framework packages...
-    pip install fastapi>=0.104.0 uvicorn[standard]>=0.24.0 python-multipart>=0.0.6 pydantic>=2.5.0
+    conda run -n bioacoustics-web-app pip install fastapi>=0.104.0 uvicorn[standard]>=0.24.0 python-multipart>=0.0.6 pydantic>=2.5.0
     if %errorlevel% neq 0 (
         echo Error: Failed to install web packages
         pause
@@ -111,6 +111,11 @@ if %errorlevel% equ 0 (
     )
     echo ✓ Web framework packages installed
 )
+
+REM Also ensure httpx compatibility for FastAPI testing
+echo Ensuring httpx compatibility for FastAPI TestClient...
+conda run -n bioacoustics-web-app pip install "httpx<0.27" >nul 2>&1
+echo ✓ httpx version compatibility ensured
 
 REM Check for Node.js and npm
 where node >nul 2>&1
@@ -177,6 +182,15 @@ echo Creating enhanced Windows run script...
 echo @echo off
 echo echo Starting Bioacoustics Active Learning Web Application...
 echo.
+echo REM Initialize conda if needed
+echo where conda ^>nul 2^>^&1
+echo if %%errorlevel%% neq 0 ^(
+echo     echo Error: conda not found in PATH
+echo     echo Please ensure conda is installed and initialized
+echo     pause
+echo     exit /b 1
+echo ^)
+echo.
 echo REM Check environment exists
 echo conda env list ^| findstr "bioacoustics-web-app" ^>nul
 echo if %%errorlevel%% neq 0 ^(
@@ -186,8 +200,16 @@ echo     pause
 echo     exit /b 1
 echo ^)
 echo.
-echo REM Activate environment
+echo REM Activate environment ^(this requires conda init to have been run^)
 echo call conda activate bioacoustics-web-app
+echo if %%errorlevel%% neq 0 ^(
+echo     echo Error: Failed to activate conda environment
+echo     echo If you see "conda activate is not a recognized command", run:
+echo     echo   conda init cmd.exe
+echo     echo Then restart Command Prompt and try again
+echo     pause
+echo     exit /b 1
+echo ^)
 echo echo ✓ Activated bioacoustics-web-app environment
 echo.
 echo REM Verify key packages are available
