@@ -29,6 +29,9 @@ dependencies:
   
   # pip dependencies (packages that work better via pip, especially on macOS)
   - pip:
+    # Core dependencies (pinned for compatibility)
+    - setuptools==69.5.1  # Required by tensorflow-hub; newer versions break pkg_resources import
+
     # Audio processing (pip is more reliable on macOS and Apple Silicon)
     - soundfile>=0.12.0
     - polars>=0.20.0

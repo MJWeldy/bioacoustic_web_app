@@ -39,6 +39,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 ```
 
 ### Required Dependencies
+- **setuptools version**: Pinned to 69.5.1 (newer versions break tensorflow-hub's pkg_resources import)
 - **httpx compatibility**: Automatically installed via environment.yml (`httpx<0.27` for FastAPI TestClient)
 - **Main packages**: All packages in environment.yml (polars, fastapi, tensorflow, etc.)
 
