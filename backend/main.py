@@ -3956,8 +3956,9 @@ def get_validation_audio_clip(file_path: str, clip_start: float = None, clip_end
     import os
     from fastapi.responses import StreamingResponse, FileResponse
 
-    # Cache directory setup
-    CACHE_DIR = Path("/tmp/bioacoustic_audio_cache")
+    # Cache directory setup (cross-platform)
+    import tempfile
+    CACHE_DIR = Path(tempfile.gettempdir()) / "bioacoustic_audio_cache"
     MAX_CACHE_SIZE_GB = 2
     MAX_CACHE_SIZE_BYTES = MAX_CACHE_SIZE_GB * 1024 * 1024 * 1024
 
@@ -4004,12 +4005,17 @@ def get_validation_audio_clip(file_path: str, clip_start: float = None, clip_end
         # Decode URL-encoded file path
         decoded_path = unquote(file_path)
 
-        # Add leading slash if missing (FastAPI strips it from path parameters)
-        if not decoded_path.startswith('/'):
+        # Handle path reconstruction (cross-platform)
+        # FastAPI strips leading slashes, so we need to restore them for Unix paths
+        # but NOT for Windows paths (which start with drive letters like C:)
+        file_path_obj = Path(decoded_path)
+        if not file_path_obj.is_absolute():
+            # If not absolute, assume it's a Unix path missing the leading slash
             decoded_path = '/' + decoded_path
+            file_path_obj = Path(decoded_path)
 
         # Check if file exists
-        if not Path(decoded_path).exists():
+        if not file_path_obj.exists():
             raise HTTPException(status_code=404, detail=f"Audio file not found: {decoded_path}")
 
         # Optimization: If no specific clip range is requested, OR if we want to rely on browser seeking,
