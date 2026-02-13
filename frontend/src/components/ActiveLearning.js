@@ -365,11 +365,34 @@ const ActiveLearning = ({ isActive = true }) => {
 
       // Load clip labels for multiclass view
       await loadClipLabels(clip.clip_id);
+
+      // Prefetch next clip's spectrogram in background for faster navigation
+      prefetchNextSpectrogram();
     } catch (error) {
       toast.error('Failed to load clip');
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const prefetchNextSpectrogram = () => {
+    // Only prefetch if we have clips and there's a next clip
+    if (!clips || currentClipIndex >= clips.length - 1) return;
+
+    const nextClip = clips[currentClipIndex + 1];
+    if (!nextClip || !nextClip.file_path) return;
+
+    // Use a background axios request to trigger server cache and browser cache
+    // No need to wait for response - this is fire-and-forget prefetching
+    axios.post('/api/spectrogram', {
+      file_path: nextClip.file_path,
+      clip_start: nextClip.clip_start,
+      clip_end: nextClip.clip_end,
+      color_mode: colorMode
+    }).catch(error => {
+      // Silently fail - prefetch is optional optimization
+      console.debug('Prefetch failed (non-critical):', error);
+    });
   };
 
   const annotateClip = async (annotation) => {

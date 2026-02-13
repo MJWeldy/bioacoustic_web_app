@@ -91,6 +91,52 @@ training_state = {
     "stop_requested": False
 }
 
+# Spectrogram cache configuration (module-level for global access)
+import tempfile
+import hashlib
+SPECTROGRAM_CACHE_DIR = Path(tempfile.gettempdir()) / "bioacoustic_spectrogram_cache"
+MAX_SPECTROGRAM_CACHE_SIZE_GB = 1
+MAX_SPECTROGRAM_CACHE_SIZE_BYTES = MAX_SPECTROGRAM_CACHE_SIZE_GB * 1024 * 1024 * 1024
+
+def get_spectrogram_cache_key(file_path: str, start: float, end: float, color_mode: str) -> str:
+    """Generate unique cache key for a spectrogram including color mode"""
+    cache_string = f"{file_path}_{start}_{end}_{color_mode}"
+    return hashlib.md5(cache_string.encode()).hexdigest() + ".png"
+
+def get_spectrogram_cache_size() -> int:
+    """Get total size of spectrogram cache directory in bytes"""
+    total_size = 0
+    if SPECTROGRAM_CACHE_DIR.exists():
+        for file in SPECTROGRAM_CACHE_DIR.iterdir():
+            if file.is_file():
+                total_size += file.stat().st_size
+    return total_size
+
+def cleanup_old_spectrogram_files():
+    """Remove oldest spectrogram cache files if cache exceeds size limit"""
+    if not SPECTROGRAM_CACHE_DIR.exists():
+        return
+
+    current_size = get_spectrogram_cache_size()
+    if current_size <= MAX_SPECTROGRAM_CACHE_SIZE_BYTES:
+        return
+
+    # Get all cache files sorted by access time (oldest first)
+    cache_files = [(f, f.stat().st_atime) for f in SPECTROGRAM_CACHE_DIR.iterdir() if f.is_file()]
+    cache_files.sort(key=lambda x: x[1])
+
+    # Remove oldest files until under 80% limit to avoid frequent cleanup
+    for file_path, _ in cache_files:
+        if current_size <= MAX_SPECTROGRAM_CACHE_SIZE_BYTES * 0.8:
+            break
+        try:
+            file_size = file_path.stat().st_size
+            file_path.unlink()
+            current_size -= file_size
+            print(f"Spectrogram cache cleanup: Removed {file_path.name} ({file_size / 1024 / 1024:.2f} MB)")
+        except Exception as e:
+            print(f"Spectrogram cache cleanup error: {e}")
+
 # Pydantic models
 class ClassMapItem(BaseModel):
     name: str
@@ -1592,7 +1638,7 @@ async def delete_annotation(clip_id: str, class_name: str = None):
 
 @app.post("/api/spectrogram")
 def generate_spectrogram(request: SpectrogramRequest):
-    """Generate spectrogram data for a clip"""
+    """Generate spectrogram data for a clip with caching"""
     try:
         import matplotlib
         matplotlib.use('Agg')  # Use non-interactive backend
@@ -1601,16 +1647,42 @@ def generate_spectrogram(request: SpectrogramRequest):
         import librosa.display
         import io
         import base64
-        
+
+        # Generate cache key (includes color mode for proper invalidation)
+        cache_key = get_spectrogram_cache_key(
+            request.file_path,
+            request.clip_start,
+            request.clip_end,
+            request.color_mode
+        )
+
+        # Create cache directory if it doesn't exist
+        SPECTROGRAM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file_path = SPECTROGRAM_CACHE_DIR / cache_key
+
+        # Check cache first (FAST PATH)
+        if cache_file_path.exists():
+            print(f"Spectrogram cache HIT: {cache_key}")
+            # Update access time for LRU cleanup
+            cache_file_path.touch()
+
+            # Read cached PNG and convert to base64 for backward compatibility
+            with open(cache_file_path, 'rb') as f:
+                image_data = base64.b64encode(f.read()).decode()
+            return {"spectrogram": f"data:image/png;base64,{image_data}"}
+
+        # Cache MISS - Generate spectrogram
+        print(f"Spectrogram cache MISS: Generating for {request.file_path} ({request.clip_start}-{request.clip_end}s, {request.color_mode})")
+
         # Load audio with buffer
         buffer_s = 1.0  # 1 second buffer
         buffered_start = max(0, request.clip_start - buffer_s)
-        
+
         import soundfile as sf
         f = sf.SoundFile(request.file_path)
         file_duration = f.frames / f.samplerate
         buffered_end = min(file_duration, request.clip_end + buffer_s)
-        
+
         # Load buffered audio
         audio = u.load_audio(request.file_path, (buffered_start, buffered_end, f.samplerate))
 
@@ -1622,59 +1694,73 @@ def generate_spectrogram(request: SpectrogramRequest):
         plt.figure(figsize=(12, 6))
         nyquist = cfg.MODEL_SR // 2
         fmax = min(cfg.MAX_FREQ, nyquist)
-        
+
         S = librosa.feature.melspectrogram(
-            y=audio, 
+            y=audio,
             sr=cfg.MODEL_SR,
             n_mels=256,
             fmax=fmax,
             hop_length=128
         )
         S_dB = librosa.power_to_db(S, ref=np.max)
-        
+
         # Display
         # Validate color mode and use it directly
         valid_cmaps = ['viridis', 'plasma', 'inferno', 'gray_r', 'magma', 'cividis']
         cmap = request.color_mode if request.color_mode in valid_cmaps else 'viridis'
         print(f"DEBUG: Using colormap: {cmap}")
         librosa.display.specshow(
-            S_dB, 
+            S_dB,
             sr=cfg.MODEL_SR,
-            x_axis='time', 
-            y_axis='mel', 
+            x_axis='time',
+            y_axis='mel',
             fmax=fmax,
             x_coords=np.linspace(buffered_start, buffered_end, S.shape[1]),
             cmap=cmap
         )
-        
+
         # Format X-axis to mm:ss
         from matplotlib.ticker import FuncFormatter
         def format_m_s(x, pos):
             minutes = int(x // 60)
             seconds = int(x % 60)
             return f"{minutes:02d}:{seconds:02d}"
-        
+
         plt.gca().xaxis.set_major_formatter(FuncFormatter(format_m_s))
-        
+
         plt.colorbar(format='%+2.0f dB')
-        
+
         # Add clip boundaries
         plt.axvline(x=request.clip_start, color='r', linestyle='-', linewidth=2, alpha=0.7)
         plt.axvline(x=request.clip_end, color='r', linestyle='-', linewidth=2, alpha=0.7)
-        
+
         plt.xlabel("Time (seconds)")
         plt.title(f'Clip: {request.clip_start:.1f}s - {request.clip_end:.1f}s')
         plt.tight_layout()
-        
-        # Convert to base64
+
+        # Save to buffer and cache file
         buffer = io.BytesIO()
         plt.savefig(buffer, format='png', dpi=100)
         buffer.seek(0)
+
+        # Save to cache
+        try:
+            with open(cache_file_path, 'wb') as f:
+                f.write(buffer.getvalue())
+            print(f"Spectrogram cache SAVE: {cache_key} ({cache_file_path.stat().st_size / 1024:.2f} KB)")
+
+            # Cleanup old cache if needed
+            cleanup_old_spectrogram_files()
+        except Exception as e:
+            print(f"Spectrogram cache save error (non-fatal): {e}")
+
+        # Convert to base64 for response
+        buffer.seek(0)
         image_data = base64.b64encode(buffer.getvalue()).decode()
         plt.close()
-        
+
         return {"spectrogram": f"data:image/png;base64,{image_data}"}
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

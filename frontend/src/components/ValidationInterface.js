@@ -400,6 +400,29 @@ const ValidationInterface = () => {
         toast.error('Failed to load spectrogram');
       }
     }
+
+    // Prefetch next clip's spectrogram in background for faster navigation
+    prefetchNextSpectrogram();
+  };
+
+  const prefetchNextSpectrogram = () => {
+    // Only prefetch if we have a queue and there's a next clip
+    if (!validationQueue || queueIndex >= validationQueue.length - 1) return;
+
+    const nextClip = validationQueue[queueIndex + 1];
+    if (!nextClip || !nextClip.audio_file_path) return;
+
+    // Use a background axios request to trigger server cache and browser cache
+    // No need to wait for response - this is fire-and-forget prefetching
+    axios.post('/api/spectrogram', {
+      file_path: nextClip.audio_file_path,
+      clip_start: nextClip.start_time || 0,
+      clip_end: nextClip.end_time || 0,
+      color_mode: colorMode
+    }).catch(error => {
+      // Silently fail - prefetch is optional optimization
+      console.debug('Prefetch failed (non-critical):', error);
+    });
   };
 
   const submitValidation = async (validationState, confidence = 3, notes = '') => {
