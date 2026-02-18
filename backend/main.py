@@ -3489,6 +3489,9 @@ async def start_validation_session(request: Request):
 @app.post("/api/validation/submit-annotation")
 async def submit_validation_annotation(request: Request):
     """Submit a validation annotation"""
+    import time
+    start_time = time.time()
+
     body = await request.json()
     prediction_id = body.get("prediction_id")
     validation_state = body.get("validation_state")
@@ -3496,6 +3499,8 @@ async def submit_validation_annotation(request: Request):
     notes = body.get("notes", "")
     strata_id = body.get("strata_id")
     species_name = body.get("species_name")
+
+    print(f"PERF: submit_annotation - request parsed in {(time.time() - start_time)*1000:.1f}ms")
 
     if not prediction_id or not validation_state:
         raise HTTPException(status_code=400, detail="prediction_id and validation_state are required")
@@ -3507,14 +3512,18 @@ async def submit_validation_annotation(request: Request):
         validation_db = app_state["validation_db"]
 
         # Get the original prediction
+        t1 = time.time()
         prediction = validation_db.predictions_df.filter(
             pl.col("prediction_id") == prediction_id
         ).row(0, named=True)
+        print(f"PERF: submit_annotation - get prediction in {(time.time() - t1)*1000:.1f}ms")
 
         # Check for existing annotation to handle updates
+        t1 = time.time()
         existing_annotation = validation_db.validation_annotations_df.filter(
             pl.col("prediction_id") == prediction_id
         )
+        print(f"PERF: submit_annotation - check existing in {(time.time() - t1)*1000:.1f}ms")
         
         previous_state = None
         if len(existing_annotation) > 0:
@@ -3563,11 +3572,14 @@ async def submit_validation_annotation(request: Request):
         })
 
         # Add to annotations database
+        t1 = time.time()
         validation_db.validation_annotations_df = pl.concat([
             validation_db.validation_annotations_df, new_annotation
         ])
+        print(f"PERF: submit_annotation - concat annotation in {(time.time() - t1)*1000:.1f}ms")
 
         # Update progress tracking
+        t1 = time.time()
         if strata_id and species_name:
             # Get current progress
             current_progress = validation_db.validation_progress_df.filter(
@@ -3638,6 +3650,7 @@ async def submit_validation_annotation(request: Request):
                     )
 
                 # Get updated progress across ALL strata for this species
+                t2 = time.time()
                 species_progress = validation_db.validation_progress_df.filter(
                     pl.col("species_name") == species_name
                 )
@@ -3664,21 +3677,48 @@ async def submit_validation_annotation(request: Request):
                 else:
                     updated_progress = validation_db.validation_progress_df.filter(mask).row(0, named=True)
 
-                # Auto-save after annotation
-                auto_save_success = validation_db.auto_save()
-                if not auto_save_success:
-                    print("WARNING: Auto-save failed - annotations only in memory!")
-                    print(f"WARNING: project_base_path={validation_db.project_base_path}, project_name={validation_db.project_name}")
+                print(f"PERF: submit_annotation - progress aggregation in {(time.time() - t2)*1000:.1f}ms")
+                print(f"PERF: submit_annotation - total progress update in {(time.time() - t1)*1000:.1f}ms")
+
+                # Auto-save after annotation (non-blocking)
+                import threading
+                def save_in_background():
+                    try:
+                        auto_save_success = validation_db.auto_save()
+                        if not auto_save_success:
+                            print("WARNING: Auto-save failed - annotations only in memory!")
+                            print(f"WARNING: project_base_path={validation_db.project_base_path}, project_name={validation_db.project_name}")
+                        else:
+                            print(f"INFO: Auto-saved after annotation for {species_name} in strata {strata_id}")
+                    except Exception as e:
+                        print(f"WARNING: Auto-save exception: {e}")
+
+                save_thread = threading.Thread(target=save_in_background, daemon=True)
+                save_thread.start()
+
+                t_stats = time.time()
+                overall_stats = get_overall_validation_stats()
+                print(f"PERF: submit_annotation - get_overall_stats in {(time.time() - t_stats)*1000:.1f}ms")
+                print(f"PERF: submit_annotation - TOTAL TIME: {(time.time() - start_time)*1000:.1f}ms")
 
                 return {
                     "status": "success",
                     "session_progress": updated_progress,
-                    "overall_progress": get_overall_validation_stats(),
+                    "overall_progress": overall_stats,
                     "target_met": target_met
                 }
 
-        # Auto-save after annotation (even if no progress tracking)
-        validation_db.auto_save()
+        # Auto-save after annotation (non-blocking, even if no progress tracking)
+        import threading
+        def save_in_background():
+            try:
+                validation_db.auto_save()
+                print("INFO: Auto-saved after annotation (no progress tracking)")
+            except Exception as e:
+                print(f"WARNING: Auto-save exception: {e}")
+
+        save_thread = threading.Thread(target=save_in_background, daemon=True)
+        save_thread.start()
 
         return {
             "status": "success",
