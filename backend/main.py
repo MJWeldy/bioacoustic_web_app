@@ -3663,38 +3663,66 @@ async def submit_validation_annotation(request: Request):
 
                 # Get updated progress for current strata and species-wide
                 t2 = time.time()
-                current_strata_progress = validation_db.validation_progress_df.filter(mask)
-                species_progress = validation_db.validation_progress_df.filter(
-                    pl.col("species_name") == species_name
-                )
+                try:
+                    current_strata_progress = validation_db.validation_progress_df.filter(mask)
+                    species_progress = validation_db.validation_progress_df.filter(
+                        pl.col("species_name") == species_name
+                    )
 
-                if len(current_strata_progress) > 0 and len(species_progress) > 0:
-                    # Current strata data
-                    current_strata_row = current_strata_progress.row(0, named=True)
+                    if len(current_strata_progress) > 0 and len(species_progress) > 0:
+                        # Current strata data
+                        current_strata_row = current_strata_progress.row(0, named=True)
 
-                    # Combine current strata data with species-wide aggregation
-                    updated_progress = {
-                        # Current strata data (used for counts display)
-                        "strata_id": strata_id,
-                        "strata_name": current_strata_row["strata_name"],
-                        "species_name": species_name,
-                        "total_clips": current_strata_row["total_clips"],
-                        "validated_clips": current_strata_row["validated_clips"],
-                        "confirmed_clips": current_strata_row["confirmed_clips"],
-                        "rejected_clips": current_strata_row["rejected_clips"],
-                        "uncertain_clips": current_strata_row["uncertain_clips"],
-                        "skipped_clips": current_strata_row["skipped_clips"],
-                        "target_confirmations": current_strata_row["target_confirmations"],
-                        "is_completed": current_strata_row["is_completed"],
-                        "last_updated": current_strata_row["last_updated"],
-                        # Species-wide aggregated data (used for progress bar)
-                        "total_strata": len(species_progress),
-                        "completed_strata": int(species_progress["is_completed"].sum()),
-                        "species_total_clips": int(species_progress["total_clips"].sum()),
-                        "species_validated_clips": int(species_progress["validated_clips"].sum()),
-                    }
-                else:
-                    updated_progress = current_strata_progress.row(0, named=True) if len(current_strata_progress) > 0 else None
+                        # Combine current strata data with species-wide aggregation
+                        updated_progress = {
+                            # Current strata data (used for counts display)
+                            "strata_id": strata_id,
+                            "strata_name": current_strata_row["strata_name"],
+                            "species_name": species_name,
+                            "total_clips": int(current_strata_row["total_clips"]),
+                            "validated_clips": int(current_strata_row["validated_clips"]),
+                            "confirmed_clips": int(current_strata_row["confirmed_clips"]),
+                            "rejected_clips": int(current_strata_row["rejected_clips"]),
+                            "uncertain_clips": int(current_strata_row["uncertain_clips"]),
+                            "skipped_clips": int(current_strata_row["skipped_clips"]),
+                            "target_confirmations": int(current_strata_row["target_confirmations"]),
+                            "is_completed": bool(current_strata_row["is_completed"]),
+                            "last_updated": current_strata_row["last_updated"],
+                            # Species-wide aggregated data (used for progress bar)
+                            "total_strata": len(species_progress),
+                            "completed_strata": int(species_progress["is_completed"].sum()),
+                            "species_total_clips": int(species_progress["total_clips"].sum()),
+                            "species_validated_clips": int(species_progress["validated_clips"].sum()),
+                        }
+                    elif len(current_strata_progress) > 0:
+                        # Fallback: just current strata data, add empty species-wide fields
+                        current_strata_row = current_strata_progress.row(0, named=True)
+                        updated_progress = {
+                            "strata_id": strata_id,
+                            "strata_name": current_strata_row["strata_name"],
+                            "species_name": species_name,
+                            "total_clips": int(current_strata_row["total_clips"]),
+                            "validated_clips": int(current_strata_row["validated_clips"]),
+                            "confirmed_clips": int(current_strata_row["confirmed_clips"]),
+                            "rejected_clips": int(current_strata_row["rejected_clips"]),
+                            "uncertain_clips": int(current_strata_row["uncertain_clips"]),
+                            "skipped_clips": int(current_strata_row["skipped_clips"]),
+                            "target_confirmations": int(current_strata_row["target_confirmations"]),
+                            "is_completed": bool(current_strata_row["is_completed"]),
+                            "last_updated": current_strata_row["last_updated"],
+                            "total_strata": 1,
+                            "completed_strata": 0,
+                            "species_total_clips": int(current_strata_row["total_clips"]),
+                            "species_validated_clips": int(current_strata_row["validated_clips"]),
+                        }
+                    else:
+                        updated_progress = None
+                        print("WARNING: No current_strata_progress found!")
+                except Exception as e:
+                    print(f"ERROR building updated_progress: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    updated_progress = None
 
                 print(f"PERF: submit_annotation - progress aggregation in {(time.time() - t2)*1000:.1f}ms")
                 print(f"PERF: submit_annotation - total progress update in {(time.time() - t1)*1000:.1f}ms")
