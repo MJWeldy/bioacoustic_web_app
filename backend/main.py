@@ -3735,6 +3735,44 @@ async def get_strata_progress():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/validation/toggle-strata-completion")
+async def toggle_strata_completion(request: Request):
+    """Toggle completion status for a strata/species combination"""
+    try:
+        body = await request.json()
+        strata_id = body.get("strata_id")
+        species_name = body.get("species_name")
+        is_completed = body.get("is_completed", False)
+
+        if not strata_id or not species_name:
+            raise HTTPException(status_code=400, detail="strata_id and species_name are required")
+
+        if app_state["validation_db"] is None:
+            raise HTTPException(status_code=400, detail="No validation database loaded")
+
+        validation_db = app_state["validation_db"]
+        result = validation_db.toggle_strata_completion(strata_id, species_name, is_completed)
+
+        if result['status'] == 'error':
+            raise HTTPException(status_code=400, detail=result['message'])
+
+        # Auto-save after toggling completion
+        if validation_db.project_base_path:
+            try:
+                validation_db.save_validation_database(
+                    base_path=validation_db.project_base_path,
+                    project_name=validation_db.project_name
+                )
+            except Exception as e:
+                print(f"WARNING: Auto-save failed after toggling completion: {e}")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/validation/annotations")
 async def get_validation_annotations(
     strata_id: Optional[str] = None,

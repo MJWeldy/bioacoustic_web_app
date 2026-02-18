@@ -83,6 +83,7 @@ class ValidationDB:
                 'uncertain_clips': pl.Int32,  # Number marked uncertain
                 'skipped_clips': pl.Int32,    # Number skipped
                 'target_confirmations': pl.Int32, # Target number of confirmations
+                'is_completed': pl.Boolean,   # Manually marked as complete
                 'last_updated': pl.Datetime   # Last progress update
             }
         )
@@ -1183,6 +1184,7 @@ class ValidationDB:
                         'uncertain_clips': 0,
                         'skipped_clips': 0,
                         'target_confirmations': 1,
+                        'is_completed': False,
                         'last_updated': datetime.now()
                     })
 
@@ -1484,6 +1486,9 @@ class ValidationDB:
 
             prog = load_table("validation_progress.parquet", "validation_progress")
             if prog is not None:
+                # Schema migration: add is_completed column if missing
+                if 'is_completed' not in prog.columns:
+                    prog = prog.with_columns(pl.lit(False).alias('is_completed'))
                 self.validation_progress_df = prog
 
             return {
@@ -1505,6 +1510,60 @@ class ValidationDB:
             return {
                 'status': 'error',
                 'message': f'Failed to load validation database: {str(e)}'
+            }
+
+    def toggle_strata_completion(self, strata_id: str, species_name: str, is_completed: bool) -> Dict[str, Any]:
+        """
+        Mark a strata/species combination as complete or incomplete.
+
+        Args:
+            strata_id: The strata ID
+            species_name: The species name
+            is_completed: Whether to mark as complete (True) or incomplete (False)
+        Returns:
+            Dict with status and updated progress
+        """
+        try:
+            # Update completion status for this strata/species
+            self.validation_progress_df = self.validation_progress_df.with_columns(
+                pl.when(
+                    (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
+                )
+                .then(pl.lit(is_completed))
+                .otherwise(pl.col('is_completed'))
+                .alias('is_completed'),
+
+                pl.when(
+                    (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
+                )
+                .then(pl.lit(datetime.now()))
+                .otherwise(pl.col('last_updated'))
+                .alias('last_updated')
+            )
+
+            # Get updated progress record
+            progress_record = self.validation_progress_df.filter(
+                (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
+            )
+
+            if len(progress_record) == 0:
+                return {
+                    'status': 'error',
+                    'message': 'Progress record not found'
+                }
+
+            progress_dict = progress_record.to_dicts()[0]
+
+            return {
+                'status': 'success',
+                'message': f'Strata marked as {"complete" if is_completed else "incomplete"}',
+                'progress': progress_dict
+            }
+
+        except Exception as e:
+            return {
+                'status': 'error',
+                'message': f'Failed to update completion status: {str(e)}'
             }
 
     def list_validation_projects(self, base_path: str) -> Dict[str, Any]:

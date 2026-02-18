@@ -326,6 +326,32 @@ const ValidationInterface = () => {
     }
   };
 
+  const toggleStrataCompletion = async (isCompleted) => {
+    if (!selectedStrata || !selectedSpecies) {
+      toast.error('No active validation session');
+      return;
+    }
+
+    try {
+      const response = await axios.post('/api/validation/toggle-strata-completion', {
+        strata_id: selectedStrata,
+        species_name: selectedSpecies,
+        is_completed: isCompleted
+      });
+
+      if (response.data.status === 'success') {
+        setSessionProgress(prev => ({
+          ...prev,
+          is_completed: isCompleted
+        }));
+        toast.success(isCompleted ? 'Strata marked as complete' : 'Strata marked as incomplete');
+      }
+    } catch (error) {
+      toast.error('Failed to update completion status');
+      console.error('Toggle completion error:', error);
+    }
+  };
+
   const loadClip = async (clipData) => {
     if (!clipData) return;
 
@@ -923,6 +949,34 @@ const ValidationInterface = () => {
                 <div style={{ fontWeight: 'bold', color: '#6c757d' }}>{sessionProgress.skipped_clips}</div>
                 <div style={{ fontSize: '0.75rem', color: '#666' }}>Skipped</div>
               </div>
+            </div>
+
+            {/* Completion Status */}
+            <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid #e0e0e0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={sessionProgress?.is_completed || false}
+                  onChange={(e) => toggleStrataCompletion(e.target.checked)}
+                  style={{ width: '18px', height: '18px', accentColor: '#059669' }}
+                />
+                <span style={{ fontSize: '0.875rem' }}>Mark as Complete</span>
+                {sessionProgress?.is_completed && (
+                  <span style={{
+                    backgroundColor: '#059669',
+                    color: 'white',
+                    padding: '2px 8px',
+                    borderRadius: '12px',
+                    fontSize: '0.75rem',
+                    fontWeight: 'bold'
+                  }}>
+                    COMPLETED
+                  </span>
+                )}
+              </label>
+              <span style={{ fontSize: '0.75rem', color: '#666' }}>
+                Target: {sessionProgress?.target_confirmations || 0} confirmations
+              </span>
             </div>
           </div>
         </div>

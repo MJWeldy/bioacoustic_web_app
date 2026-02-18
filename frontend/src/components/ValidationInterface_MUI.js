@@ -246,8 +246,34 @@ const ValidationInterface = ({ isActive = true }) => {
     try {
       const response = await axios.post('/api/validation/save-project', {});
       if (response.data.status === 'success') toast.success('Project saved');
-    } catch (error) { toast.error('Failed to save project'); } 
+    } catch (error) { toast.error('Failed to save project'); }
     finally { setIsSaving(false); }
+  };
+
+  const toggleStrataCompletion = async (isCompleted) => {
+    if (!selectedStrata || !selectedSpecies) {
+      toast.error('No active validation session');
+      return;
+    }
+
+    try {
+      const response = await axios.post('/api/validation/toggle-strata-completion', {
+        strata_id: selectedStrata,
+        species_name: selectedSpecies,
+        is_completed: isCompleted
+      });
+
+      if (response.data.status === 'success') {
+        setSessionProgress(prev => ({
+          ...prev,
+          is_completed: isCompleted
+        }));
+        toast.success(isCompleted ? 'Strata marked as complete' : 'Strata marked as incomplete');
+      }
+    } catch (error) {
+      toast.error('Failed to update completion status');
+      console.error('Toggle completion error:', error);
+    }
   };
 
   const loadAudio = (clipData) => {
@@ -668,6 +694,30 @@ const ValidationInterface = ({ isActive = true }) => {
                                 <Typography variant="caption" display="block" color="text.secondary">Save</Typography>
                             </Grid>
                         </Grid>
+
+                        {/* Completion Status */}
+                        <Box sx={{ mt: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <FormControlLabel
+                                control={
+                                    <Checkbox
+                                        checked={sessionProgress?.is_completed || false}
+                                        onChange={(e) => toggleStrataCompletion(e.target.checked)}
+                                        color="success"
+                                    />
+                                }
+                                label={
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                        <Typography variant="body2">Mark as Complete</Typography>
+                                        {sessionProgress?.is_completed && (
+                                            <Chip label="COMPLETED" size="small" color="success" />
+                                        )}
+                                    </Box>
+                                }
+                            />
+                            <Typography variant="caption" color="text.secondary">
+                                Target: {sessionProgress?.target_confirmations || 0} confirmations
+                            </Typography>
+                        </Box>
                     </Grid>
                 </Grid>
             </CardContent>
