@@ -98,6 +98,9 @@ SPECTROGRAM_CACHE_DIR = Path(tempfile.gettempdir()) / "bioacoustic_spectrogram_c
 MAX_SPECTROGRAM_CACHE_SIZE_GB = 1
 MAX_SPECTROGRAM_CACHE_SIZE_BYTES = MAX_SPECTROGRAM_CACHE_SIZE_GB * 1024 * 1024 * 1024
 
+# Thread lock for validation database saves (prevents race conditions)
+validation_save_lock = threading.Lock()
+
 def get_spectrogram_cache_key(file_path: str, start: float, end: float, color_mode: str) -> str:
     """Generate unique cache key for a spectrogram including color mode"""
     # Version 2: Clean spectrograms without matplotlib labels/axes
@@ -3727,18 +3730,29 @@ async def submit_validation_annotation(request: Request):
                 print(f"PERF: submit_annotation - progress aggregation in {(time.time() - t2)*1000:.1f}ms")
                 print(f"PERF: submit_annotation - total progress update in {(time.time() - t1)*1000:.1f}ms")
 
-                # Auto-save after annotation (non-blocking)
-                import threading
+                # Auto-save after annotation (non-blocking with lock)
                 def save_in_background():
+                    # Acquire lock to prevent concurrent saves
+                    acquired = validation_save_lock.acquire(blocking=False)
+                    if not acquired:
+                        print(f"INFO: Save already in progress, skipping concurrent save for {species_name}")
+                        return
+
                     try:
+                        print(f"INFO: Starting auto-save for {species_name} in strata {strata_id}")
+                        save_start = time.time()
                         auto_save_success = validation_db.auto_save()
+                        save_duration = (time.time() - save_start) * 1000
+
                         if not auto_save_success:
                             print("WARNING: Auto-save failed - annotations only in memory!")
                             print(f"WARNING: project_base_path={validation_db.project_base_path}, project_name={validation_db.project_name}")
                         else:
-                            print(f"INFO: Auto-saved after annotation for {species_name} in strata {strata_id}")
+                            print(f"INFO: Auto-saved in {save_duration:.1f}ms for {species_name} in strata {strata_id}")
                     except Exception as e:
                         print(f"WARNING: Auto-save exception: {e}")
+                    finally:
+                        validation_save_lock.release()
 
                 save_thread = threading.Thread(target=save_in_background, daemon=True)
                 save_thread.start()
@@ -3755,14 +3769,24 @@ async def submit_validation_annotation(request: Request):
                     "target_met": target_met
                 }
 
-        # Auto-save after annotation (non-blocking, even if no progress tracking)
-        import threading
+        # Auto-save after annotation (non-blocking with lock, even if no progress tracking)
         def save_in_background():
+            # Acquire lock to prevent concurrent saves
+            acquired = validation_save_lock.acquire(blocking=False)
+            if not acquired:
+                print("INFO: Save already in progress, skipping concurrent save (no progress tracking)")
+                return
+
             try:
+                print("INFO: Starting auto-save (no progress tracking)")
+                save_start = time.time()
                 validation_db.auto_save()
-                print("INFO: Auto-saved after annotation (no progress tracking)")
+                save_duration = (time.time() - save_start) * 1000
+                print(f"INFO: Auto-saved in {save_duration:.1f}ms (no progress tracking)")
             except Exception as e:
                 print(f"WARNING: Auto-save exception: {e}")
+            finally:
+                validation_save_lock.release()
 
         save_thread = threading.Thread(target=save_in_background, daemon=True)
         save_thread.start()
@@ -3893,19 +3917,28 @@ async def toggle_strata_completion(request: Request):
         if result['status'] == 'error':
             raise HTTPException(status_code=400, detail=result['message'])
 
-        # Auto-save after toggling completion (non-blocking)
-        # Run save in background thread to not block response
+        # Auto-save after toggling completion (non-blocking with lock)
         if validation_db.project_base_path:
-            import threading
             def save_in_background():
+                # Acquire lock to prevent concurrent saves
+                acquired = validation_save_lock.acquire(blocking=False)
+                if not acquired:
+                    print(f"INFO: Save already in progress, skipping completion toggle save for {species_name}")
+                    return
+
                 try:
+                    print(f"INFO: Starting auto-save after completion toggle for {species_name}")
+                    save_start = time.time()
                     validation_db.save_validation_database(
                         base_path=validation_db.project_base_path,
                         project_name=validation_db.project_name
                     )
-                    print(f"INFO: Auto-saved after toggling completion for {species_name} in strata {strata_id}")
+                    save_duration = (time.time() - save_start) * 1000
+                    print(f"INFO: Auto-saved in {save_duration:.1f}ms after toggling completion for {species_name} in strata {strata_id}")
                 except Exception as e:
                     print(f"WARNING: Auto-save failed after toggling completion: {e}")
+                finally:
+                    validation_save_lock.release()
 
             save_thread = threading.Thread(target=save_in_background, daemon=True)
             save_thread.start()
