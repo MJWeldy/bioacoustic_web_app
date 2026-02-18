@@ -335,7 +335,47 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
         <Card elevation={0} sx={{ border: '1px solid #e0e0e0', mb: 2 }}>
           <CardContent>
             <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>Unvalidated Clips Configuration</Typography>
-            
+
+            <Alert severity="info" sx={{ mb: 3 }}>
+              <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1 }}>Strata Metadata File Format (Optional):</Typography>
+
+              <Typography variant="body2" sx={{ mb: 1 }}>
+                If providing a strata metadata file, it must be a CSV with the following columns:
+              </Typography>
+              <Box component="ul" sx={{ mt: 0, mb: 1.5, pl: 3 }}>
+                <li><code>filename</code> - Audio file name (must match files in audio directory)</li>
+                <li><code>strata</code> - Grouping identifier (site, date, region, etc.)</li>
+              </Box>
+
+              <Typography variant="body2" sx={{ mb: 0.5 }}>
+                <strong>Example:</strong>
+              </Typography>
+              <Box sx={{ overflowX: 'auto' }}>
+                <table style={{ fontSize: '0.75rem', borderCollapse: 'collapse', width: '100%', backgroundColor: '#fff' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#e0e0e0' }}>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>filename</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>strata</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>recording1.wav</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>site_A</td>
+                    </tr>
+                    <tr style={{ backgroundColor: '#f9f9f9' }}>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>recording2.wav</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>site_A</td>
+                    </tr>
+                    <tr>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>recording3.wav</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>site_B</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </Box>
+            </Alert>
+
             <Grid container spacing={2}>
               <Grid item xs={12} md={6}>
                 <TextField
