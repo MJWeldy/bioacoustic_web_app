@@ -3449,11 +3449,32 @@ async def start_validation_session(request: Request):
         else:
             print("DEBUG: No predictions found for validation session!")
 
-        # Get current progress
-        progress_row = validation_db.validation_progress_df.filter(
-            (pl.col("strata_id") == strata_id) &
-            (pl.col("species_name") == species_name)
-        ).row(0, named=True) if len(validation_db.validation_progress_df) > 0 else None
+        # Get progress across ALL strata for this species (species-wide progress)
+        species_progress = validation_db.validation_progress_df.filter(
+            pl.col("species_name") == species_name
+        )
+
+        if len(species_progress) > 0:
+            # Aggregate across all strata for this species
+            aggregated_progress = {
+                "strata_id": strata_id,  # Keep current strata_id for reference
+                "strata_name": species_progress.filter(pl.col("strata_id") == strata_id)["strata_name"][0] if len(species_progress.filter(pl.col("strata_id") == strata_id)) > 0 else "",
+                "species_name": species_name,
+                "total_clips": int(species_progress["total_clips"].sum()),
+                "validated_clips": int(species_progress["validated_clips"].sum()),
+                "confirmed_clips": int(species_progress["confirmed_clips"].sum()),
+                "rejected_clips": int(species_progress["rejected_clips"].sum()),
+                "uncertain_clips": int(species_progress["uncertain_clips"].sum()),
+                "skipped_clips": int(species_progress["skipped_clips"].sum()),
+                "target_confirmations": int(species_progress["target_confirmations"].sum()),
+                "is_completed": species_progress.filter(pl.col("strata_id") == strata_id)["is_completed"][0] if len(species_progress.filter(pl.col("strata_id") == strata_id)) > 0 else False,
+                "last_updated": species_progress["last_updated"].max(),
+                "total_strata": len(species_progress),
+                "completed_strata": int(species_progress["is_completed"].sum())
+            }
+            progress_row = aggregated_progress
+        else:
+            progress_row = None
 
         return {
             "status": "success",
@@ -3616,8 +3637,32 @@ async def submit_validation_annotation(request: Request):
                         pl.when(mask).then(lit_value).otherwise(pl.col(field)).alias(field)
                     )
 
-                # Get updated progress
-                updated_progress = validation_db.validation_progress_df.filter(mask).row(0, named=True)
+                # Get updated progress across ALL strata for this species
+                species_progress = validation_db.validation_progress_df.filter(
+                    pl.col("species_name") == species_name
+                )
+
+                if len(species_progress) > 0:
+                    # Aggregate across all strata for this species
+                    aggregated_progress = {
+                        "strata_id": strata_id,
+                        "strata_name": species_progress.filter(pl.col("strata_id") == strata_id)["strata_name"][0] if len(species_progress.filter(pl.col("strata_id") == strata_id)) > 0 else "",
+                        "species_name": species_name,
+                        "total_clips": int(species_progress["total_clips"].sum()),
+                        "validated_clips": int(species_progress["validated_clips"].sum()),
+                        "confirmed_clips": int(species_progress["confirmed_clips"].sum()),
+                        "rejected_clips": int(species_progress["rejected_clips"].sum()),
+                        "uncertain_clips": int(species_progress["uncertain_clips"].sum()),
+                        "skipped_clips": int(species_progress["skipped_clips"].sum()),
+                        "target_confirmations": int(species_progress["target_confirmations"].sum()),
+                        "is_completed": species_progress.filter(pl.col("strata_id") == strata_id)["is_completed"][0] if len(species_progress.filter(pl.col("strata_id") == strata_id)) > 0 else False,
+                        "last_updated": species_progress["last_updated"].max(),
+                        "total_strata": len(species_progress),
+                        "completed_strata": int(species_progress["is_completed"].sum())
+                    }
+                    updated_progress = aggregated_progress
+                else:
+                    updated_progress = validation_db.validation_progress_df.filter(mask).row(0, named=True)
 
                 # Auto-save after annotation
                 auto_save_success = validation_db.auto_save()

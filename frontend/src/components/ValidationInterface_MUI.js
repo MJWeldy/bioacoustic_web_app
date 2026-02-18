@@ -674,20 +674,40 @@ const ValidationInterface = ({ isActive = true }) => {
       </Grid>
 
       {/* Progress Bar */}
-      {overallProgress && (
+      {sessionProgress && (
         <Card elevation={0} sx={{ border: '1px solid #e0e0e0', mb: 2 }}>
             <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
                 <Grid container alignItems="center" spacing={3}>
                     <Grid item xs={12} md={4}>
                         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
-                            <Typography variant="caption" fontWeight="bold">SESSION PROGRESS</Typography>
-                            <Typography variant="caption">{Math.round((overallProgress.completed_strata_species / overallProgress.total_strata_species) * 100)}%</Typography>
+                            <Typography variant="caption" fontWeight="bold">
+                                {selectedSpecies ? `${selectedSpecies.toUpperCase()} PROGRESS` : 'SESSION PROGRESS'}
+                            </Typography>
+                            <Typography variant="caption">
+                                {sessionProgress.total_strata > 1 ? (
+                                    // Multiple strata: show strata completion
+                                    `${sessionProgress.completed_strata} / ${sessionProgress.total_strata} strata`
+                                ) : (
+                                    // Single/no strata: show clip completion
+                                    `${sessionProgress.validated_clips} / ${sessionProgress.total_clips} clips`
+                                )}
+                            </Typography>
                         </Box>
-                        <LinearProgress 
-                            variant="determinate" 
-                            value={(overallProgress.completed_strata_species / overallProgress.total_strata_species) * 100} 
-                            sx={{ height: 8, borderRadius: 4 }} 
+                        <LinearProgress
+                            variant="determinate"
+                            value={sessionProgress.total_strata > 1 ?
+                                (sessionProgress.completed_strata / sessionProgress.total_strata) * 100 :
+                                (sessionProgress.validated_clips / sessionProgress.total_clips) * 100
+                            }
+                            sx={{ height: 8, borderRadius: 4 }}
                         />
+                        <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                            {sessionProgress.total_strata > 1 ? (
+                                `${sessionProgress.validated_clips} / ${sessionProgress.total_clips} total clips validated`
+                            ) : (
+                                `${sessionProgress.confirmed_clips} confirmed, ${sessionProgress.rejected_clips} rejected`
+                            )}
+                        </Typography>
                     </Grid>
                     <Grid item xs={12} md={8}>
                         <Grid container spacing={1}>
@@ -731,7 +751,7 @@ const ValidationInterface = ({ isActive = true }) => {
                                 }
                                 label={
                                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                        <Typography variant="body2">Mark as Complete</Typography>
+                                        <Typography variant="body2">Mark Strata as Complete</Typography>
                                         {sessionProgress?.is_completed && (
                                             <Chip label="COMPLETED" size="small" color="success" />
                                         )}

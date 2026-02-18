@@ -908,7 +908,9 @@ const ValidationInterface = () => {
       {sessionProgress && (
         <div className="card card-sm">
           <div className="card-header card-header-sm" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h3 style={{ fontSize: '1rem' }}>Session Progress</h3>
+            <h3 style={{ fontSize: '1rem' }}>
+              {selectedSpecies ? `${selectedSpecies.toUpperCase()} Progress` : 'Session Progress'}
+            </h3>
             <button
               onClick={saveProject}
               disabled={isSaving}
@@ -923,30 +925,35 @@ const ValidationInterface = () => {
             <div style={{ flex: 1 }}>
               <div style={{ marginBottom: '0.25rem' }}>
                 <span style={{ fontWeight: '600', fontSize: '0.8rem' }}>
-                  {overallProgress ? (
-                    <>
-                      {overallProgress.completed_strata_species}/{overallProgress.total_strata_species} strata/species completed
-                      <span style={{ color: '#666', marginLeft: '10px' }}>
-                        ({Math.round((overallProgress.completed_strata_species / overallProgress.total_strata_species) * 100)}%)
-                      </span>
-                    </>
+                  {sessionProgress.total_strata > 1 ? (
+                    // Multiple strata: show strata completion
+                    `${sessionProgress.completed_strata} / ${sessionProgress.total_strata} strata`
                   ) : (
-                    'Loading progress...'
+                    // Single/no strata: show clip completion
+                    `${sessionProgress.validated_clips} / ${sessionProgress.total_clips} clips`
                   )}
                 </span>
               </div>
-              <div style={{
-                backgroundColor: '#e9ecef',
-                borderRadius: '4px',
-                overflow: 'hidden',
-                height: '4px'
-              }}>
-                <div style={{
-                  backgroundColor: '#059669',
-                  height: '100%',
-                  width: `${overallProgress ? (overallProgress.completed_strata_species / overallProgress.total_strata_species) * 100 : 0}%`,
-                  transition: 'width 0.3s ease'
-                }}></div>
+              <div style={{ width: '100%', backgroundColor: '#e0e0e0', borderRadius: '4px', height: '8px' }}>
+                <div
+                  style={{
+                    width: `${sessionProgress.total_strata > 1 ?
+                      (sessionProgress.completed_strata / sessionProgress.total_strata) * 100 :
+                      (sessionProgress.validated_clips / sessionProgress.total_clips) * 100
+                    }%`,
+                    backgroundColor: '#6e7cb9',
+                    height: '100%',
+                    borderRadius: '4px',
+                    transition: 'width 0.3s ease'
+                  }}
+                />
+              </div>
+              <div style={{ fontSize: '0.7rem', color: '#666', marginTop: '0.25rem' }}>
+                {sessionProgress.total_strata > 1 ? (
+                  `${sessionProgress.validated_clips} / ${sessionProgress.total_clips} total clips validated`
+                ) : (
+                  `${sessionProgress.confirmed_clips} confirmed, ${sessionProgress.rejected_clips} rejected`
+                )}
               </div>
             </div>
 
@@ -984,7 +991,7 @@ const ValidationInterface = () => {
                   onChange={(e) => toggleStrataCompletion(e.target.checked)}
                   style={{ width: '18px', height: '18px', accentColor: '#059669' }}
                 />
-                <span style={{ fontSize: '0.875rem' }}>Mark as Complete</span>
+                <span style={{ fontSize: '0.875rem' }}>Mark Strata as Complete</span>
                 {sessionProgress?.is_completed && (
                   <span style={{
                     backgroundColor: '#059669',
