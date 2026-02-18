@@ -3761,15 +3761,22 @@ async def toggle_strata_completion(request: Request):
         if result['status'] == 'error':
             raise HTTPException(status_code=400, detail=result['message'])
 
-        # Auto-save after toggling completion
+        # Auto-save after toggling completion (non-blocking)
+        # Run save in background thread to not block response
         if validation_db.project_base_path:
-            try:
-                validation_db.save_validation_database(
-                    base_path=validation_db.project_base_path,
-                    project_name=validation_db.project_name
-                )
-            except Exception as e:
-                print(f"WARNING: Auto-save failed after toggling completion: {e}")
+            import threading
+            def save_in_background():
+                try:
+                    validation_db.save_validation_database(
+                        base_path=validation_db.project_base_path,
+                        project_name=validation_db.project_name
+                    )
+                    print(f"INFO: Auto-saved after toggling completion for {species_name} in strata {strata_id}")
+                except Exception as e:
+                    print(f"WARNING: Auto-save failed after toggling completion: {e}")
+
+            save_thread = threading.Thread(target=save_in_background, daemon=True)
+            save_thread.start()
 
         return result
 

@@ -256,21 +256,45 @@ const ValidationInterface = ({ isActive = true }) => {
       return;
     }
 
+    // Optimistic update - update UI immediately for instant feedback
+    const previousState = sessionProgress?.is_completed;
+    setSessionProgress(prev => ({
+      ...prev,
+      is_completed: isCompleted
+    }));
+
     try {
-      const response = await axios.post('/api/validation/toggle-strata-completion', {
+      // Fire and forget the API call - don't wait for auto-save
+      axios.post('/api/validation/toggle-strata-completion', {
         strata_id: selectedStrata,
         species_name: selectedSpecies,
         is_completed: isCompleted
-      });
-
-      if (response.data.status === 'success') {
+      }).then(response => {
+        if (response.data.status === 'success') {
+          toast.success(isCompleted ? 'Strata marked as complete' : 'Strata marked as incomplete', { autoClose: 2000 });
+        } else {
+          // Rollback on error
+          setSessionProgress(prev => ({
+            ...prev,
+            is_completed: previousState
+          }));
+          toast.error('Failed to update completion status');
+        }
+      }).catch(error => {
+        // Rollback on error
         setSessionProgress(prev => ({
           ...prev,
-          is_completed: isCompleted
+          is_completed: previousState
         }));
-        toast.success(isCompleted ? 'Strata marked as complete' : 'Strata marked as incomplete');
-      }
+        toast.error('Failed to update completion status');
+        console.error('Toggle completion error:', error);
+      });
     } catch (error) {
+      // Rollback on immediate error
+      setSessionProgress(prev => ({
+        ...prev,
+        is_completed: previousState
+      }));
       toast.error('Failed to update completion status');
       console.error('Toggle completion error:', error);
     }
