@@ -100,7 +100,8 @@ MAX_SPECTROGRAM_CACHE_SIZE_BYTES = MAX_SPECTROGRAM_CACHE_SIZE_GB * 1024 * 1024 *
 
 def get_spectrogram_cache_key(file_path: str, start: float, end: float, color_mode: str) -> str:
     """Generate unique cache key for a spectrogram including color mode"""
-    cache_string = f"{file_path}_{start}_{end}_{color_mode}"
+    # Version 2: Clean spectrograms without matplotlib labels/axes
+    cache_string = f"v2_{file_path}_{start}_{end}_{color_mode}"
     return hashlib.md5(cache_string.encode()).hexdigest() + ".png"
 
 def get_spectrogram_cache_size() -> int:
@@ -1666,10 +1667,34 @@ def generate_spectrogram(request: SpectrogramRequest):
             # Update access time for LRU cleanup
             cache_file_path.touch()
 
-            # Read cached PNG and convert to base64 for backward compatibility
+            # Read cached PNG and convert to base64
             with open(cache_file_path, 'rb') as f:
                 image_data = base64.b64encode(f.read()).decode()
-            return {"spectrogram": f"data:image/png;base64,{image_data}"}
+
+            # Calculate metadata (lightweight operation)
+            buffer_s = 1.0
+            buffered_start = max(0, request.clip_start - buffer_s)
+
+            import soundfile as sf
+            f = sf.SoundFile(request.file_path)
+            file_duration = f.frames / f.samplerate
+            buffered_end = min(file_duration, request.clip_end + buffer_s)
+            nyquist = cfg.MODEL_SR // 2
+            fmax = min(cfg.MAX_FREQ, nyquist)
+
+            return {
+                "spectrogram": f"data:image/png;base64,{image_data}",
+                "metadata": {
+                    "time_start": float(buffered_start),
+                    "time_end": float(buffered_end),
+                    "clip_start": float(request.clip_start),
+                    "clip_end": float(request.clip_end),
+                    "freq_min": 0,
+                    "freq_max": int(fmax),
+                    "db_min": -80.0,  # Approximate for cached spectrograms
+                    "db_max": 0.0
+                }
+            }
 
         # Cache MISS - Generate spectrogram
         print(f"Spectrogram cache MISS: Generating for {request.file_path} ({request.clip_start}-{request.clip_end}s, {request.color_mode})")
@@ -1691,7 +1716,7 @@ def generate_spectrogram(request: SpectrogramRequest):
             audio = np.mean(audio, axis=1)
 
         # Create spectrogram
-        plt.figure(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(14, 7))
         nyquist = cfg.MODEL_SR // 2
         fmax = min(cfg.MAX_FREQ, nyquist)
 
@@ -1704,43 +1729,37 @@ def generate_spectrogram(request: SpectrogramRequest):
         )
         S_dB = librosa.power_to_db(S, ref=np.max)
 
-        # Display
         # Validate color mode and use it directly
         valid_cmaps = ['viridis', 'plasma', 'inferno', 'gray_r', 'magma', 'cividis']
         cmap = request.color_mode if request.color_mode in valid_cmaps else 'viridis'
         print(f"DEBUG: Using colormap: {cmap}")
-        librosa.display.specshow(
-            S_dB,
-            sr=cfg.MODEL_SR,
-            x_axis='time',
-            y_axis='mel',
-            fmax=fmax,
-            x_coords=np.linspace(buffered_start, buffered_end, S.shape[1]),
-            cmap=cmap
-        )
 
-        # Format X-axis to mm:ss
-        from matplotlib.ticker import FuncFormatter
-        def format_m_s(x, pos):
-            minutes = int(x // 60)
-            seconds = int(x % 60)
-            return f"{minutes:02d}:{seconds:02d}"
+        # Display clean spectrogram as image (no axes, labels, or ticks)
+        ax.imshow(S_dB, aspect='auto', origin='lower', cmap=cmap, interpolation='nearest')
 
-        plt.gca().xaxis.set_major_formatter(FuncFormatter(format_m_s))
+        # Add clip boundaries with elegant white lines
+        # Calculate positions based on spectrogram array dimensions
+        total_duration = buffered_end - buffered_start
+        clip_start_rel = request.clip_start - buffered_start
+        clip_end_rel = request.clip_end - buffered_start
 
-        plt.colorbar(format='%+2.0f dB')
+        # Convert to pixel coordinates (0 to S.shape[1])
+        x_start_px = (clip_start_rel / total_duration) * S.shape[1]
+        x_end_px = (clip_end_rel / total_duration) * S.shape[1]
 
-        # Add clip boundaries
-        plt.axvline(x=request.clip_start, color='r', linestyle='-', linewidth=2, alpha=0.7)
-        plt.axvline(x=request.clip_end, color='r', linestyle='-', linewidth=2, alpha=0.7)
+        ax.axvline(x=x_start_px, color='white', linestyle='-', linewidth=2.5, alpha=0.9)
+        ax.axvline(x=x_end_px, color='white', linestyle='-', linewidth=2.5, alpha=0.9)
 
-        plt.xlabel("Time (seconds)")
-        plt.title(f'Clip: {request.clip_start:.1f}s - {request.clip_end:.1f}s')
-        plt.tight_layout()
+        # Remove all axes, ticks, labels, and margins
+        ax.set_position([0, 0, 1, 1])
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.axis('off')
+        fig.patch.set_alpha(0)
 
-        # Save to buffer and cache file
+        # Save to buffer and cache file with no padding/margins
         buffer = io.BytesIO()
-        plt.savefig(buffer, format='png', dpi=100)
+        plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight', pad_inches=0, transparent=True)
         buffer.seek(0)
 
         # Save to cache
@@ -1759,37 +1778,21 @@ def generate_spectrogram(request: SpectrogramRequest):
         image_data = base64.b64encode(buffer.getvalue()).decode()
         plt.close()
 
-        return {"spectrogram": f"data:image/png;base64,{image_data}"}
+        # Return spectrogram with metadata for frontend scales
+        return {
+            "spectrogram": f"data:image/png;base64,{image_data}",
+            "metadata": {
+                "time_start": float(buffered_start),
+                "time_end": float(buffered_end),
+                "clip_start": float(request.clip_start),
+                "clip_end": float(request.clip_end),
+                "freq_min": 0,
+                "freq_max": int(fmax),
+                "db_min": float(np.min(S_dB)),
+                "db_max": float(np.max(S_dB))
+            }
+        }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/audio/{file_path:path}")
-def get_audio_clip(file_path: str, clip_start: float, clip_end: float):
-    """Extract and return audio clip"""
-    try:
-        import soundfile as sf
-        import io
-        from fastapi.responses import StreamingResponse
-
-        # Get file info to get original sampling rate
-        with sf.SoundFile(file_path) as f:
-            original_sr = f.samplerate
-        
-        # Load only the specific clip segment
-        clip_audio = u.load_audio(file_path, (clip_start, clip_end, original_sr))
-        
-        # Convert to bytes for streaming
-        buffer = io.BytesIO()
-        sf.write(buffer, clip_audio, cfg.TARGET_SR, format='WAV')
-        buffer.seek(0)
-        
-        return StreamingResponse(
-            io.BytesIO(buffer.getvalue()),
-            media_type="audio/wav",
-            headers={"Content-Disposition": "inline; filename=clip.wav"}
-        )
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -4031,9 +4034,9 @@ async def validation_diagnostic():
             "traceback": traceback.format_exc()
         }
 
-@app.get("/api/validation/audio/{file_path:path}")
-def get_validation_audio_clip(file_path: str, clip_start: float = None, clip_end: float = None):
-    """Get audio clip for validation interface with disk caching for extracted clips"""
+@app.get("/api/audio/{file_path:path}")
+def get_audio_clip(file_path: str, clip_start: float = None, clip_end: float = None):
+    """Get audio clip with disk caching for extracted clips (shared by all interfaces)"""
     from urllib.parse import unquote
     from pathlib import Path
     import soundfile as sf

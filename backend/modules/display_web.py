@@ -111,15 +111,15 @@ class WebAnnotationInterface:
         if len(y_buffered.shape) > 1:
             y_buffered = np.mean(y_buffered, axis=1)
 
-        # Create figure
-        plt.figure(figsize=(15, 6))
+        # Create figure with clean layout
+        fig, ax = plt.subplots(figsize=(14, 7))
 
         # Generate mel spectrogram
         nyquist = cfg.MODEL_SR // 2
         fmax = min(cfg.MAX_FREQ, nyquist)
 
         S = librosa.feature.melspectrogram(
-            y=y_buffered, 
+            y=y_buffered,
             sr=cfg.MODEL_SR,
             n_mels=256,
             fmax=fmax,
@@ -127,49 +127,32 @@ class WebAnnotationInterface:
         )
         S_dB = librosa.power_to_db(S, ref=np.max)
 
-        # Display mel spectrogram
-        img = librosa.display.specshow(
-            S_dB, 
-            sr=cfg.MODEL_SR,
-            x_axis='time', 
-            y_axis='mel', 
-            fmax=fmax, 
-            x_coords=np.linspace(buffered_start, buffered_end, S.shape[1]),
-            cmap=self.color_mode
-        )
+        # Display clean spectrogram as image (no axes, labels, or ticks)
+        ax.imshow(S_dB, aspect='auto', origin='lower', cmap=self.color_mode, interpolation='nearest')
 
-        # Add colorbar
-        plt.colorbar(img, format='%+2.0f dB')
-        plt.xlabel("Time (minutes:seconds)")
+        # Add clip boundaries with elegant white lines
+        # Calculate positions based on spectrogram array dimensions
+        total_duration = buffered_end - buffered_start
+        clip_start_rel = clip_start - buffered_start
+        clip_end_rel = clip_end - buffered_start
 
-        # Format x-axis to mm:ss
-        from matplotlib.ticker import FuncFormatter
-        def format_m_s(x, pos):
-            minutes = int(x // 60)
-            seconds = int(x % 60)
-            return f"{minutes:02d}:{seconds:02d}"
-        
-        ax = plt.gca()
-        ax.xaxis.set_major_formatter(FuncFormatter(format_m_s))
+        # Convert to pixel coordinates (0 to S.shape[1])
+        x_start_px = (clip_start_rel / total_duration) * S.shape[1]
+        x_end_px = (clip_end_rel / total_duration) * S.shape[1]
 
-        # Add vertical lines for clip boundaries
-        plt.axvline(x=clip_start, color='r', linestyle='-', linewidth=2, alpha=0.7)
-        plt.axvline(x=clip_end, color='r', linestyle='-', linewidth=2, alpha=0.7)
+        ax.axvline(x=x_start_px, color='white', linestyle='-', linewidth=2.5, alpha=0.9)
+        ax.axvline(x=x_end_px, color='white', linestyle='-', linewidth=2.5, alpha=0.9)
 
-        # Add text labels with HMS format
-        plt.text(clip_start, 0, format_time_hms(clip_start), color='r', fontweight='bold',
-                verticalalignment='bottom', horizontalalignment='center')
-        plt.text(clip_end, 0, format_time_hms(clip_end), color='r', fontweight='bold',
-                verticalalignment='bottom', horizontalalignment='center')
-
-        # Set title with HMS format
-        duration = clip_end - clip_start
-        plt.title(f'Clip: {format_time_hms(clip_start)} - {format_time_hms(clip_end)} (Duration: {duration:.2f}s)')
-        plt.tight_layout(pad=0.5)
+        # Remove all axes, ticks, labels, and margins
+        ax.set_position([0, 0, 1, 1])
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.axis('off')
+        fig.patch.set_alpha(0)
 
         # Convert to base64
         buffer = io.BytesIO()
-        plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
+        plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight', pad_inches=0, transparent=True)
         buffer.seek(0)
         image_data = base64.b64encode(buffer.getvalue()).decode()
         plt.close()

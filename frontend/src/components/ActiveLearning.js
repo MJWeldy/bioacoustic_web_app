@@ -3,6 +3,7 @@ import axios from 'axios';
 import { toast } from 'react-toastify';
 import { Range } from 'react-range';
 import Select from 'react-select';
+import SpectrogramViewer from './SpectrogramViewer';
 
 const ActiveLearning = ({ isActive = true }) => {
   const [datasetPath, setDatasetPath] = useState('');
@@ -15,6 +16,7 @@ const ActiveLearning = ({ isActive = true }) => {
   const [clips, setClips] = useState([]);
   const [currentClipIndex, setCurrentClipIndex] = useState(0);
   const [spectrogram, setSpectrogram] = useState(null);
+  const [spectrogramMetadata, setSpectrogramMetadata] = useState(null);
   const [datasetMetadata, setDatasetMetadata] = useState(null);
   const [availableClasses, setAvailableClasses] = useState([]);
   const [selectedClass, setSelectedClass] = useState(null);
@@ -24,6 +26,7 @@ const ActiveLearning = ({ isActive = true }) => {
   const [reviewMode, setReviewMode] = useState('random');
   const [additionalPositiveClasses, setAdditionalPositiveClasses] = useState([]);
   const [roundProgress, setRoundProgress] = useState(null);
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
   const audioRef = useRef(null);
 
   const colorModeOptions = [
@@ -355,9 +358,12 @@ const ActiveLearning = ({ isActive = true }) => {
 
       const spectrogramResponse = await axios.post('/api/spectrogram', spectrogramRequest);
       setSpectrogram(spectrogramResponse.data.spectrogram);
+      setSpectrogramMetadata(spectrogramResponse.data.metadata || null);
 
       // Load audio
       if (audioRef.current) {
+        audioRef.current.currentTime = 0;
+        setAudioCurrentTime(0);
         const audioUrl = `/api/audio/${encodeURIComponent(clip.file_path)}?clip_start=${clip.clip_start}&clip_end=${clip.clip_end}`;
         audioRef.current.src = audioUrl;
         audioRef.current.load();
@@ -1085,24 +1091,14 @@ const ActiveLearning = ({ isActive = true }) => {
                 </button>
               )}
             </div>
-            {spectrogram ? (
-              <img
-                src={spectrogram}
-                alt="Spectrogram" 
-                style={{ 
-                  width: '100%', 
-                  height: '600px', 
-                  objectFit: 'contain',
-                  border: '1px solid #ddd',
-                  borderRadius: '4px',
-                  backgroundColor: '#f8f9fa'
-                }}
-              />
-            ) : (
-              <div className="loading" style={{ height: '600px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                Loading spectrogram...
-              </div>
-            )}
+            <SpectrogramViewer
+              spectrogramUrl={spectrogram}
+              metadata={spectrogramMetadata}
+              audioCurrentTime={audioCurrentTime}
+              clipDuration={currentClip ? currentClip.clip_end - currentClip.clip_start : 0}
+              isLoading={!spectrogram}
+              showMetadata={true}
+            />
           </div>
 
           <div className="grid grid-2" style={{ alignItems: 'start', marginTop: '20px' }}>
@@ -1113,6 +1109,8 @@ const ActiveLearning = ({ isActive = true }) => {
                 controls
                 style={{ width: '100%', marginBottom: '20px' }}
                 autoPlay
+                onTimeUpdate={() => setAudioCurrentTime(audioRef.current?.currentTime || 0)}
+                onLoadedMetadata={() => setAudioCurrentTime(0)}
               >
                 Your browser does not support the audio element.
               </audio>

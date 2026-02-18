@@ -63,6 +63,9 @@ const ActiveLearning = ({ isActive = true }) => {
   const [roundProgress, setRoundProgress] = useState(null);
   const [isAnnotating, setIsAnnotating] = useState(false);
 
+  // Scroll management
+  const annotationAreaRef = useRef(null);
+
   // Audio Player State
   const audioRef = useRef(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -342,6 +345,13 @@ const ActiveLearning = ({ isActive = true }) => {
     // Reset audio state for new clip
     setIsPlaying(false);
     setCurrentTime(0);
+
+    // Prevent jumping to top by scrolling annotation area into view
+    if (annotationAreaRef.current) {
+      setTimeout(() => {
+        annotationAreaRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 50);
+    }
 
     // Extract round progress metadata if available
     if (clip.round_position && clip.round_total) {
@@ -1083,7 +1093,7 @@ const ActiveLearning = ({ isActive = true }) => {
 
       {/* Main Content: Left Spectrogram/Audio + Right Controls */}
       {isDatasetLoaded && isAnnotating && (
-        <Grid container spacing={2}>
+        <Grid container spacing={2} ref={annotationAreaRef} sx={{ minHeight: 600 }}>
           {/* Left Column - Spectrogram & Audio Combined */}
           <Grid item xs={12} md={8}>
             <Card elevation={0} sx={{ border: '1px solid #e0e0e0' }}>

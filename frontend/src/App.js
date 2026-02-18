@@ -13,8 +13,9 @@ import Evaluation from './components/Evaluation';
 import ModelTraining from './components/ModelTraining';
 import DatabaseViewer from './components/DatabaseViewer';
 import ValidationDatasetBuilder from './components/ValidationDatasetBuilder';
-import ValidationInterface from './components/ValidationInterface';
-import ValidationViewer from './components/ValidationViewer';
+//import ValidationInterface from './components/ValidationInterface';
+import ValidationInterface from './components/ValidationInterface_MUI';
+import ValidationViewer from './components/ValidationViewer_MUI';
 import './App.css';
 
 function App() {

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { toast } from 'react-toastify';
+import SpectrogramViewer, { formatTime, formatFreq } from './SpectrogramViewer';
 import {
   Box,
   Card,
@@ -93,10 +94,14 @@ const ValidationInterface = ({ isActive = true }) => {
 
   // Spectrogram
   const [spectrogramUrl, setSpectrogramUrl] = useState(null);
+  const [spectrogramMetadata, setSpectrogramMetadata] = useState(null);
   const [colorMode, setColorMode] = useState('viridis');
   
   // Hotkeys
   const [hotkeysEnabled, setHotkeysEnabled] = useState(false);
+
+  // Scroll management
+  const validationAreaRef = useRef(null);
 
   const colorModeOptions = [
     { value: 'viridis', label: 'Viridis' },
@@ -116,6 +121,14 @@ const ValidationInterface = ({ isActive = true }) => {
         loadSpectrogram(currentClip);
         // Preload next clip after a short delay
         setTimeout(() => preloadNextClip(), 100);
+
+        // Prevent jumping to top by scrolling validation area into view
+        if (validationAreaRef.current) {
+            // Use setTimeout to ensure the DOM has updated
+            setTimeout(() => {
+                validationAreaRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }, 50);
+        }
     }
   }, [currentClip]);
 
@@ -250,8 +263,9 @@ const ValidationInterface = ({ isActive = true }) => {
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
+      setAudioCurrentTime(0);
 
-      const audioUrl = `/api/validation/audio/${clipData.audio_file_path}?clip_start=${clipData.start_time || 0}&clip_end=${clipData.end_time || 0}`;
+      const audioUrl = `/api/audio/${clipData.audio_file_path}?clip_start=${clipData.start_time || 0}&clip_end=${clipData.end_time || 0}`;
       audioRef.current.src = audioUrl;
       audioRef.current.load();
 
@@ -276,7 +290,10 @@ const ValidationInterface = ({ isActive = true }) => {
             clip_end: clipData.end_time || 0,
             color_mode: colorMode
         });
-        if (specRes.data.spectrogram) setSpectrogramUrl(specRes.data.spectrogram);
+        if (specRes.data.spectrogram) {
+            setSpectrogramUrl(specRes.data.spectrogram);
+            setSpectrogramMetadata(specRes.data.metadata || null);
+        }
     } catch (e) { console.error("Spectrogram error", e); }
   };
 
@@ -288,7 +305,7 @@ const ValidationInterface = ({ isActive = true }) => {
     if (!nextClip || !nextClip.audio_file_path) return;
 
     if (preloadAudioRef.current) {
-      const audioUrl = `/api/validation/audio/${nextClip.audio_file_path}?clip_start=${nextClip.start_time || 0}&clip_end=${nextClip.end_time || 0}`;
+      const audioUrl = `/api/audio/${nextClip.audio_file_path}?clip_start=${nextClip.start_time || 0}&clip_end=${nextClip.end_time || 0}`;
       preloadAudioRef.current.src = audioUrl;
       preloadAudioRef.current.load();
     }
@@ -659,7 +676,7 @@ const ValidationInterface = ({ isActive = true }) => {
 
       {/* Main Validation Area */}
       {currentClip && (
-        <Grid container spacing={2}>
+        <Grid container spacing={2} ref={validationAreaRef} sx={{ minHeight: 600 }}>
             {/* Left: Spectrogram & Audio */}
             <Grid item xs={12} md={8}>
                 <Card elevation={0} sx={{ border: '1px solid #e0e0e0', height: '100%' }}>
@@ -682,25 +699,71 @@ const ValidationInterface = ({ isActive = true }) => {
                             </Stack>
                         }
                         subheader={
-                            <Stack direction="row" spacing={2} sx={{ mt: 0.5 }}>
-                                <Typography variant="body2" color="text.secondary">Time: {currentClip.start_time?.toFixed(1)}s - {currentClip.end_time?.toFixed(1)}s</Typography>
-                                <Typography variant="body2" color="text.secondary">Score: <strong>{currentClip.confidence?.toFixed(3)}</strong></Typography>
-                                <Typography variant="body2" color="text.secondary">Species: <strong>{currentClip.species_name}</strong></Typography>
+                            <Stack direction="row" spacing={4} sx={{ mt: 1.5, flexWrap: 'wrap' }}>
+                                <Box>
+                                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', fontWeight: 'bold', letterSpacing: '0.05em' }}>CLIP RANGE</Typography>
+                                    <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                                        {spectrogramMetadata ? `${formatTime(spectrogramMetadata.clip_start)} — ${formatTime(spectrogramMetadata.clip_end)}` : `${currentClip.start_time?.toFixed(1)}s - ${currentClip.end_time?.toFixed(1)}s`}
+                                    </Typography>
+                                </Box>
+                                <Box>
+                                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', fontWeight: 'bold', letterSpacing: '0.05em' }}>DURATION</Typography>
+                                    <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                                        {spectrogramMetadata ? `${(spectrogramMetadata.clip_end - spectrogramMetadata.clip_start).toFixed(2)}s` : `${(currentClip.end_time - currentClip.start_time).toFixed(1)}s`}
+                                    </Typography>
+                                </Box>
+                                <Box>
+                                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', fontWeight: 'bold', letterSpacing: '0.05em' }}>FREQ RANGE</Typography>
+                                    <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                                        {spectrogramMetadata ? `${formatFreq(spectrogramMetadata.freq_min)} - ${formatFreq(spectrogramMetadata.freq_max)}Hz` : 'N/A'}
+                                    </Typography>
+                                </Box>
+                                <Box>
+                                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', fontWeight: 'bold', letterSpacing: '0.05em' }}>SCORE</Typography>
+                                    <Typography variant="body2" sx={{ color: 'primary.main', fontWeight: 'bold' }}>{currentClip.confidence?.toFixed(3)}</Typography>
+                                </Box>
+                                <Box>
+                                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', fontWeight: 'bold', letterSpacing: '0.05em' }}>SPECIES</Typography>
+                                    <Typography variant="body2" sx={{ fontWeight: 'bold' }}>{currentClip.species_name}</Typography>
+                                </Box>
                             </Stack>
                         }
                         action={
-                            <Stack direction="row">
-                                <IconButton onClick={goToPreviousClip} disabled={queueIndex === 0}><PrevIcon /></IconButton>
-                                <IconButton onClick={advanceToNextClip} disabled={queueIndex >= validationQueue.length - 1}><NextIcon /></IconButton>
+                            <Stack direction="row" spacing={1}>
+                                <Button
+                                    variant="outlined"
+                                    size="small"
+                                    onClick={goToPreviousClip}
+                                    disabled={queueIndex === 0}
+                                    startIcon={<PrevIcon />}
+                                >
+                                    Previous
+                                </Button>
+                                <Button
+                                    variant="outlined"
+                                    size="small"
+                                    onClick={advanceToNextClip}
+                                    disabled={queueIndex >= validationQueue.length - 1}
+                                    endIcon={<NextIcon />}
+                                >
+                                    Next
+                                </Button>
                             </Stack>
                         }
                     />
                     <CardContent>
-                        {/* Spectrogram - Increased Height */}
-                        <Box sx={{ width: '100%', height: 500, bgcolor: '#000', borderRadius: 1, mb: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-                            {spectrogramUrl ? <img src={spectrogramUrl} alt="Spectrogram" style={{ width: '100%', height: '100%', objectFit: 'contain' }} /> : <Typography color="white">Loading Spectrogram...</Typography>}
+                        {/* Spectrogram Viewer */}
+                        <Box sx={{ mb: 2 }}>
+                            <SpectrogramViewer
+                                spectrogramUrl={spectrogramUrl}
+                                metadata={spectrogramMetadata}
+                                audioCurrentTime={audioCurrentTime}
+                                clipDuration={currentClip ? currentClip.end_time - currentClip.start_time : 0}
+                                isLoading={!spectrogramUrl}
+                                showMetadata={false}
+                            />
                         </Box>
-                        
+
                         {/* Audio Controls */}
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                             <IconButton onClick={togglePlayPause} color="primary" size="large" sx={{ border: '2px solid', width: 48, height: 48 }}>

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { toast } from 'react-toastify';
+import SpectrogramViewer from './SpectrogramViewer';
 
 const ValidationInterface = () => {
   // Project loading states
@@ -46,6 +47,7 @@ const ValidationInterface = () => {
 
   // Spectrogram (separate state to avoid re-renders when updating currentClip)
   const [spectrogramUrl, setSpectrogramUrl] = useState(null);
+  const [spectrogramMetadata, setSpectrogramMetadata] = useState(null);
 
   // Spectrogram color mode
   const [colorMode, setColorMode] = useState('viridis');
@@ -343,6 +345,7 @@ const ValidationInterface = () => {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
     }
+    setAudioCurrentTime(0);
 
     // Load audio if available
     if (clipData.audio_file_path && clipData.audio_file_path.trim()) {
@@ -357,8 +360,8 @@ const ValidationInterface = () => {
       try {
         // Use backend slicing with query parameters to serve only the specific clip
         // This ensures the audio player timeline matches the clip duration (e.g. 5s) instead of the full file (e.g. 1h)
-        // The backend endpoint is now non-blocking (def instead of async def), so this slicing won't freeze the server
-        const audioUrl = `/api/validation/audio/${clipData.audio_file_path}?clip_start=${clipData.start_time || 0}&clip_end=${clipData.end_time || 0}`;
+        // The backend endpoint uses disk caching for performance
+        const audioUrl = `/api/audio/${clipData.audio_file_path}?clip_start=${clipData.start_time || 0}&clip_end=${clipData.end_time || 0}`;
         console.log('Setting audio URL:', audioUrl);
 
         audioRef.current.src = audioUrl;
@@ -394,6 +397,7 @@ const ValidationInterface = () => {
 
         if (spectrogramResponse.data.spectrogram) {
           setSpectrogramUrl(spectrogramResponse.data.spectrogram);
+          setSpectrogramMetadata(spectrogramResponse.data.metadata || null);
         }
       } catch (error) {
         console.error('Error loading spectrogram:', error);
@@ -965,27 +969,14 @@ const ValidationInterface = () => {
             </div>
           </div>
 
-          <div>
-            <h4>Spectrogram</h4>
-            {spectrogramUrl ? (
-              <img
-                src={spectrogramUrl}
-                alt="Spectrogram"
-                style={{
-                  width: '100%',
-                  height: '600px',
-                  objectFit: 'contain',
-                  border: '1px solid #ddd',
-                  borderRadius: '4px',
-                  backgroundColor: '#f8f9fa'
-                }}
-              />
-            ) : (
-              <div className="loading" style={{ height: '600px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                Loading spectrogram...
-              </div>
-            )}
-          </div>
+          <SpectrogramViewer
+            spectrogramUrl={spectrogramUrl}
+            metadata={spectrogramMetadata}
+            audioCurrentTime={audioCurrentTime}
+            clipDuration={currentClip ? currentClip.end_time - currentClip.start_time : 0}
+            isLoading={!spectrogramUrl}
+            showMetadata={true}
+          />
 
           <div className="grid grid-2" style={{ alignItems: 'start', marginTop: '20px' }}>
             <div>
