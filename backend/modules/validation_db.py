@@ -1524,6 +1524,22 @@ class ValidationDB:
             Dict with status and updated progress
         """
         try:
+            print(f"DEBUG: toggle_strata_completion called with strata_id={strata_id}, species={species_name}, is_completed={is_completed}")
+            print(f"DEBUG: validation_progress_df has {len(self.validation_progress_df)} rows")
+            print(f"DEBUG: validation_progress_df columns: {self.validation_progress_df.columns}")
+
+            # Check if record exists first
+            existing = self.validation_progress_df.filter(
+                (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
+            )
+            print(f"DEBUG: Found {len(existing)} matching records")
+
+            if len(existing) == 0:
+                return {
+                    'status': 'error',
+                    'message': f'No progress record found for strata_id={strata_id}, species={species_name}'
+                }
+
             # Update completion status for this strata/species
             self.validation_progress_df = self.validation_progress_df.with_columns(
                 pl.when(
@@ -1546,13 +1562,8 @@ class ValidationDB:
                 (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
             )
 
-            if len(progress_record) == 0:
-                return {
-                    'status': 'error',
-                    'message': 'Progress record not found'
-                }
-
             progress_dict = progress_record.to_dicts()[0]
+            print(f"DEBUG: Updated progress record: {progress_dict}")
 
             return {
                 'status': 'success',
@@ -1561,6 +1572,9 @@ class ValidationDB:
             }
 
         except Exception as e:
+            import traceback
+            print(f"ERROR in toggle_strata_completion: {str(e)}")
+            print(f"ERROR traceback:\n{traceback.format_exc()}")
             return {
                 'status': 'error',
                 'message': f'Failed to update completion status: {str(e)}'

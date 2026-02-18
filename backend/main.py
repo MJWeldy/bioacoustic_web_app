@@ -3394,15 +3394,20 @@ async def start_validation_session(request: Request):
             ])
 
         # Get already validated prediction IDs
-        validated_ids = validation_db.validation_annotations_df.filter(
+        validated_annotations = validation_db.validation_annotations_df.filter(
             (pl.col("strata_id") == strata_id) &
             (pl.col("species_name") == species_name)
-        )["prediction_id"].to_list()
+        )
+        validated_ids = validated_annotations["prediction_id"].to_list()
         print(f"DEBUG: Found {len(validated_ids)} already validated predictions")
+        if len(validated_annotations) > 0:
+            print(f"DEBUG: Sample validated annotation: {validated_annotations.head(1).to_dicts()}")
 
         if review_mode:
             # Review Mode: Filter FOR validated clips
             before_filter = len(predictions)
+            if len(validated_ids) == 0:
+                print("WARNING: Review mode requested but no validated clips found for this strata/species")
             predictions = predictions.filter(pl.col("prediction_id").is_in(validated_ids))
             print(f"DEBUG: Review Mode - After filtering for validated: {len(predictions)} (was {before_filter})")
             
