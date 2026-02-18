@@ -557,6 +557,101 @@ const ValidationDatasetBuilder = () => {
             <p>Load model predictions from CSV files in wide or long format</p>
           </div>
 
+          <div style={{
+            padding: '1rem',
+            backgroundColor: '#e3f2fd',
+            border: '1px solid #90caf9',
+            borderRadius: '4px',
+            marginBottom: '1.5rem'
+          }}>
+            <h4 style={{ marginTop: 0, color: '#1976d2', fontSize: '0.95rem' }}>CSV File Format Requirements:</h4>
+
+            <p style={{ marginBottom: '0.75rem', fontSize: '0.875rem' }}>
+              <strong>Required Columns (both formats):</strong>
+            </p>
+            <ul style={{ marginBottom: '1rem', paddingLeft: '1.5rem', fontSize: '0.875rem' }}>
+              <li><code>filename</code> - Audio file name</li>
+              <li><code>start_time</code> - Clip start time in seconds</li>
+              <li><code>end_time</code> - Clip end time in seconds</li>
+              <li><code>strata</code> - Grouping identifier (site, date, etc.)</li>
+            </ul>
+
+            <p style={{ marginBottom: '0.5rem', fontSize: '0.875rem' }}>
+              <strong>Wide Format</strong> (species as columns):
+            </p>
+            <div style={{ overflowX: 'auto', marginBottom: '1rem' }}>
+              <table style={{ fontSize: '0.75rem', borderCollapse: 'collapse', width: '100%', backgroundColor: '#fff' }}>
+                <thead>
+                  <tr style={{ backgroundColor: '#e0e0e0' }}>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>filename</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>start_time</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>end_time</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>strata</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>Species1</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>Species2</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>Species3</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>audio1.wav</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.0</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>3.0</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>site_A</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.85</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.12</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.03</td>
+                  </tr>
+                  <tr style={{ backgroundColor: '#f9f9f9' }}>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>audio1.wav</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>3.0</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>6.0</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>site_A</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.92</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.08</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.15</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p style={{ marginBottom: '0.5rem', fontSize: '0.875rem' }}>
+              <strong>Long Format</strong> (species in rows):
+            </p>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ fontSize: '0.75rem', borderCollapse: 'collapse', width: '100%', backgroundColor: '#fff' }}>
+                <thead>
+                  <tr style={{ backgroundColor: '#e0e0e0' }}>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>filename</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>start_time</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>end_time</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>strata</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>species_name</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>confidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>audio1.wav</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.0</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>3.0</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>site_A</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>Species1</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.85</td>
+                  </tr>
+                  <tr style={{ backgroundColor: '#f9f9f9' }}>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>audio1.wav</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.0</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>3.0</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>site_A</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>Species2</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.12</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <div className="grid grid-2">
             <div className="form-group">
               <label htmlFor="predictionsFile">Predictions File/Directory *</label>
@@ -661,6 +756,83 @@ const ValidationDatasetBuilder = () => {
           <div className="card-header">
             <h3>PNW-CNet Predictions Configuration</h3>
             <p>Load default PNW-CNet prediction output with automatic filename parsing</p>
+          </div>
+
+          <div style={{
+            padding: '1rem',
+            backgroundColor: '#fff3e0',
+            border: '1px solid #ffb74d',
+            borderRadius: '4px',
+            marginBottom: '1.5rem'
+          }}>
+            <h4 style={{ marginTop: 0, color: '#e65100', fontSize: '0.95rem' }}>PNW-CNet File Format Requirements:</h4>
+
+            <p style={{ marginBottom: '0.75rem', fontSize: '0.875rem' }}>
+              <strong>CSV Structure:</strong>
+            </p>
+            <ul style={{ marginBottom: '1rem', paddingLeft: '1.5rem', fontSize: '0.875rem' }}>
+              <li><code>Filename</code> column (capital 'F') with PNW-CNet format filenames</li>
+              <li>Species names as additional column headers</li>
+              <li>Confidence values (0-1) in cells</li>
+            </ul>
+
+            <p style={{ marginBottom: '0.5rem', fontSize: '0.875rem' }}>
+              <strong>Expected Filename Format:</strong>
+            </p>
+            <pre style={{
+              backgroundColor: '#f5f5f5',
+              padding: '0.5rem',
+              borderRadius: '4px',
+              fontSize: '0.75rem',
+              overflow: 'auto',
+              marginBottom: '0.75rem'
+            }}>
+REGION_SITE-STATION_YYYYMMDD_HHMMSS_part_NNN.png
+
+Example: JCN_40758-12_20220614_123409_part_001.png
+            </pre>
+
+            <p style={{ marginBottom: '0.5rem', fontSize: '0.875rem' }}>
+              <strong>Where:</strong>
+            </p>
+            <ul style={{ marginBottom: '1rem', paddingLeft: '1.5rem', fontSize: '0.875rem' }}>
+              <li><strong>REGION:</strong> 3-letter region code (e.g., JCN)</li>
+              <li><strong>SITE:</strong> 5-digit site number (e.g., 40758)</li>
+              <li><strong>STATION:</strong> 1-2 digit station number (e.g., 12)</li>
+              <li><strong>DATE:</strong> YYYYMMDD format</li>
+              <li><strong>TIME:</strong> HHMMSS format</li>
+              <li><strong>PART:</strong> 3-digit part number (each part = 12-second clip)</li>
+            </ul>
+
+            <p style={{ marginBottom: '0.5rem', fontSize: '0.875rem' }}>
+              <strong>CSV Example:</strong>
+            </p>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ fontSize: '0.75rem', borderCollapse: 'collapse', width: '100%', backgroundColor: '#fff' }}>
+                <thead>
+                  <tr style={{ backgroundColor: '#e0e0e0' }}>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>Filename</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>Species1</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>Species2</th>
+                    <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>Species3</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style={{ border: '1px solid #ccc', padding: '6px', fontSize: '0.7rem' }}>JCN_40758-12_20220614_123409_part_001.png</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.85</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.12</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.03</td>
+                  </tr>
+                  <tr style={{ backgroundColor: '#f9f9f9' }}>
+                    <td style={{ border: '1px solid #ccc', padding: '6px', fontSize: '0.7rem' }}>JCN_40758-12_20220614_123409_part_002.png</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.92</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.08</td>
+                    <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.15</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div className="grid grid-2">

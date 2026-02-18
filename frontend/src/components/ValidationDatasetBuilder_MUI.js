@@ -422,7 +422,96 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
         <Card elevation={0} sx={{ border: '1px solid #e0e0e0', mb: 2 }}>
           <CardContent>
             <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>Prediction Sets Configuration</Typography>
-            
+
+            <Alert severity="info" sx={{ mb: 3 }}>
+              <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1 }}>CSV File Format Requirements:</Typography>
+
+              <Typography variant="body2" sx={{ mb: 1.5 }}>
+                <strong>Required Columns (both formats):</strong>
+              </Typography>
+              <Box component="ul" sx={{ mt: 0, mb: 1.5, pl: 3 }}>
+                <li><code>filename</code> - Audio file name</li>
+                <li><code>start_time</code> - Clip start time in seconds</li>
+                <li><code>end_time</code> - Clip end time in seconds</li>
+                <li><code>strata</code> - Grouping identifier (site, date, etc.)</li>
+              </Box>
+
+              <Typography variant="body2" sx={{ mb: 0.5 }}>
+                <strong>Wide Format</strong> (species as columns):
+              </Typography>
+              <Box sx={{ mb: 1.5, overflowX: 'auto' }}>
+                <table style={{ fontSize: '0.75rem', borderCollapse: 'collapse', width: '100%', backgroundColor: '#fff' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#e0e0e0' }}>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>filename</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>start_time</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>end_time</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>strata</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>Species1</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>Species2</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>Species3</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>audio1.wav</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.0</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>3.0</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>site_A</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.85</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.12</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.03</td>
+                    </tr>
+                    <tr style={{ backgroundColor: '#f9f9f9' }}>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>audio1.wav</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>3.0</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>6.0</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>site_A</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.92</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.08</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.15</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </Box>
+
+              <Typography variant="body2" sx={{ mb: 0.5 }}>
+                <strong>Long Format</strong> (species in rows):
+              </Typography>
+              <Box sx={{ overflowX: 'auto' }}>
+                <table style={{ fontSize: '0.75rem', borderCollapse: 'collapse', width: '100%', backgroundColor: '#fff' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#e0e0e0' }}>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>filename</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>start_time</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>end_time</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>strata</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>species_name</th>
+                      <th style={{ border: '1px solid #999', padding: '6px', textAlign: 'left' }}>confidence</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>audio1.wav</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.0</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>3.0</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>site_A</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>Species1</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.85</td>
+                    </tr>
+                    <tr style={{ backgroundColor: '#f9f9f9' }}>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>audio1.wav</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.0</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>3.0</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>site_A</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>Species2</td>
+                      <td style={{ border: '1px solid #ccc', padding: '6px' }}>0.12</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </Box>
+            </Alert>
+
             <Grid container spacing={2}>
               <Grid item xs={12} md={6}>
                 <TextField
