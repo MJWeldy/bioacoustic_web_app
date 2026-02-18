@@ -3449,30 +3449,42 @@ async def start_validation_session(request: Request):
         else:
             print("DEBUG: No predictions found for validation session!")
 
-        # Get progress across ALL strata for this species (species-wide progress)
+        # Get current strata progress (for validation counts)
+        current_strata_progress = validation_db.validation_progress_df.filter(
+            (pl.col("strata_id") == strata_id) &
+            (pl.col("species_name") == species_name)
+        )
+
+        # Get progress across ALL strata for this species (for progress bar)
         species_progress = validation_db.validation_progress_df.filter(
             pl.col("species_name") == species_name
         )
 
-        if len(species_progress) > 0:
-            # Aggregate across all strata for this species
-            aggregated_progress = {
-                "strata_id": strata_id,  # Keep current strata_id for reference
-                "strata_name": species_progress.filter(pl.col("strata_id") == strata_id)["strata_name"][0] if len(species_progress.filter(pl.col("strata_id") == strata_id)) > 0 else "",
+        if len(current_strata_progress) > 0 and len(species_progress) > 0:
+            # Current strata data (for validation counts)
+            current_strata_row = current_strata_progress.row(0, named=True)
+
+            # Add species-wide aggregated data (for progress bar)
+            progress_row = {
+                # Current strata data (used for counts display)
+                "strata_id": strata_id,
+                "strata_name": current_strata_row["strata_name"],
                 "species_name": species_name,
-                "total_clips": int(species_progress["total_clips"].sum()),
-                "validated_clips": int(species_progress["validated_clips"].sum()),
-                "confirmed_clips": int(species_progress["confirmed_clips"].sum()),
-                "rejected_clips": int(species_progress["rejected_clips"].sum()),
-                "uncertain_clips": int(species_progress["uncertain_clips"].sum()),
-                "skipped_clips": int(species_progress["skipped_clips"].sum()),
-                "target_confirmations": int(species_progress["target_confirmations"].sum()),
-                "is_completed": species_progress.filter(pl.col("strata_id") == strata_id)["is_completed"][0] if len(species_progress.filter(pl.col("strata_id") == strata_id)) > 0 else False,
-                "last_updated": species_progress["last_updated"].max(),
+                "total_clips": current_strata_row["total_clips"],
+                "validated_clips": current_strata_row["validated_clips"],
+                "confirmed_clips": current_strata_row["confirmed_clips"],
+                "rejected_clips": current_strata_row["rejected_clips"],
+                "uncertain_clips": current_strata_row["uncertain_clips"],
+                "skipped_clips": current_strata_row["skipped_clips"],
+                "target_confirmations": current_strata_row["target_confirmations"],
+                "is_completed": current_strata_row["is_completed"],
+                "last_updated": current_strata_row["last_updated"],
+                # Species-wide aggregated data (used for progress bar)
                 "total_strata": len(species_progress),
-                "completed_strata": int(species_progress["is_completed"].sum())
+                "completed_strata": int(species_progress["is_completed"].sum()),
+                "species_total_clips": int(species_progress["total_clips"].sum()),
+                "species_validated_clips": int(species_progress["validated_clips"].sum()),
             }
-            progress_row = aggregated_progress
         else:
             progress_row = None
 
@@ -3649,33 +3661,40 @@ async def submit_validation_annotation(request: Request):
                         pl.when(mask).then(lit_value).otherwise(pl.col(field)).alias(field)
                     )
 
-                # Get updated progress across ALL strata for this species
+                # Get updated progress for current strata and species-wide
                 t2 = time.time()
+                current_strata_progress = validation_db.validation_progress_df.filter(mask)
                 species_progress = validation_db.validation_progress_df.filter(
                     pl.col("species_name") == species_name
                 )
 
-                if len(species_progress) > 0:
-                    # Aggregate across all strata for this species
-                    aggregated_progress = {
+                if len(current_strata_progress) > 0 and len(species_progress) > 0:
+                    # Current strata data
+                    current_strata_row = current_strata_progress.row(0, named=True)
+
+                    # Combine current strata data with species-wide aggregation
+                    updated_progress = {
+                        # Current strata data (used for counts display)
                         "strata_id": strata_id,
-                        "strata_name": species_progress.filter(pl.col("strata_id") == strata_id)["strata_name"][0] if len(species_progress.filter(pl.col("strata_id") == strata_id)) > 0 else "",
+                        "strata_name": current_strata_row["strata_name"],
                         "species_name": species_name,
-                        "total_clips": int(species_progress["total_clips"].sum()),
-                        "validated_clips": int(species_progress["validated_clips"].sum()),
-                        "confirmed_clips": int(species_progress["confirmed_clips"].sum()),
-                        "rejected_clips": int(species_progress["rejected_clips"].sum()),
-                        "uncertain_clips": int(species_progress["uncertain_clips"].sum()),
-                        "skipped_clips": int(species_progress["skipped_clips"].sum()),
-                        "target_confirmations": int(species_progress["target_confirmations"].sum()),
-                        "is_completed": species_progress.filter(pl.col("strata_id") == strata_id)["is_completed"][0] if len(species_progress.filter(pl.col("strata_id") == strata_id)) > 0 else False,
-                        "last_updated": species_progress["last_updated"].max(),
+                        "total_clips": current_strata_row["total_clips"],
+                        "validated_clips": current_strata_row["validated_clips"],
+                        "confirmed_clips": current_strata_row["confirmed_clips"],
+                        "rejected_clips": current_strata_row["rejected_clips"],
+                        "uncertain_clips": current_strata_row["uncertain_clips"],
+                        "skipped_clips": current_strata_row["skipped_clips"],
+                        "target_confirmations": current_strata_row["target_confirmations"],
+                        "is_completed": current_strata_row["is_completed"],
+                        "last_updated": current_strata_row["last_updated"],
+                        # Species-wide aggregated data (used for progress bar)
                         "total_strata": len(species_progress),
-                        "completed_strata": int(species_progress["is_completed"].sum())
+                        "completed_strata": int(species_progress["is_completed"].sum()),
+                        "species_total_clips": int(species_progress["total_clips"].sum()),
+                        "species_validated_clips": int(species_progress["validated_clips"].sum()),
                     }
-                    updated_progress = aggregated_progress
                 else:
-                    updated_progress = validation_db.validation_progress_df.filter(mask).row(0, named=True)
+                    updated_progress = current_strata_progress.row(0, named=True) if len(current_strata_progress) > 0 else None
 
                 print(f"PERF: submit_annotation - progress aggregation in {(time.time() - t2)*1000:.1f}ms")
                 print(f"PERF: submit_annotation - total progress update in {(time.time() - t1)*1000:.1f}ms")

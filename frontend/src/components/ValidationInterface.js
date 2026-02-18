@@ -950,7 +950,7 @@ const ValidationInterface = () => {
               </div>
               <div style={{ fontSize: '0.7rem', color: '#666', marginTop: '0.25rem' }}>
                 {sessionProgress.total_strata > 1 ? (
-                  `${sessionProgress.validated_clips} / ${sessionProgress.total_clips} total clips validated`
+                  `${sessionProgress.species_validated_clips || sessionProgress.validated_clips} / ${sessionProgress.species_total_clips || sessionProgress.total_clips} total clips across all strata`
                 ) : (
                   `${sessionProgress.confirmed_clips} confirmed, ${sessionProgress.rejected_clips} rejected`
                 )}
