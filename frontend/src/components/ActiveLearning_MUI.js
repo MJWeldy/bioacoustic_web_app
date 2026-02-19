@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { toast } from 'react-toastify';
+import SpectrogramViewer, { formatTime as formatTimeDetailed, formatFreq } from './SpectrogramViewer';
 import {
   Box,
   Card,
@@ -51,7 +52,8 @@ const ActiveLearning = ({ isActive = true }) => {
   const [currentClip, setCurrentClip] = useState(null);
   const [clips, setClips] = useState([]);
   const [currentClipIndex, setCurrentClipIndex] = useState(0);
-  const [spectrogram, setSpectrogram] = useState(null);
+  const [spectrogramUrl, setSpectrogramUrl] = useState(null);
+  const [spectrogramMetadata, setSpectrogramMetadata] = useState(null);
   const [datasetMetadata, setDatasetMetadata] = useState(null);
   const [availableClasses, setAvailableClasses] = useState([]);
   const [selectedClass, setSelectedClass] = useState(null);
@@ -377,7 +379,8 @@ const ActiveLearning = ({ isActive = true }) => {
       };
 
       const spectrogramResponse = await axios.post('/api/spectrogram', spectrogramRequest);
-      setSpectrogram(spectrogramResponse.data.spectrogram);
+      setSpectrogramUrl(spectrogramResponse.data.spectrogram);
+      setSpectrogramMetadata(spectrogramResponse.data.metadata || null);
 
       // Load audio
       if (audioRef.current) {
@@ -656,9 +659,9 @@ const ActiveLearning = ({ isActive = true }) => {
   };
 
   const saveSpectrogram = () => {
-    if (!spectrogram) return;
+    if (!spectrogramUrl) return;
     const link = document.createElement('a');
-    link.href = spectrogram;
+    link.href = spectrogramUrl;
     link.download = `spectrogram_${currentClip?.clip_id || 'clip'}.png`;
     link.click();
   };
@@ -1108,30 +1111,23 @@ const ActiveLearning = ({ isActive = true }) => {
                     size="small"
                     onClick={saveSpectrogram}
                     startIcon={<SaveIcon />}
-                    disabled={!spectrogram}
+                    disabled={!spectrogramUrl}
                   >
                     SAVE IMAGE
                   </Button>
                 </Stack>
 
-                {/* Spectrogram Image with Skeleton */}
-                {!isLoading && spectrogram ? (
-                  <Box
-                    component="img"
-                    src={spectrogram}
-                    alt="Spectrogram"
-                    sx={{
-                      width: '100%',
-                      height: 'auto',
-                      border: '1px solid #e0e0e0',
-                      borderRadius: 1,
-                      backgroundColor: '#fafafa',
-                      mb: 2,
-                    }}
+                {/* Spectrogram Viewer */}
+                <Box sx={{ mb: 2 }}>
+                  <SpectrogramViewer
+                    spectrogramUrl={spectrogramUrl}
+                    metadata={spectrogramMetadata}
+                    audioCurrentTime={currentTime}
+                    clipDuration={currentClip ? currentClip.clip_end - currentClip.clip_start : 0}
+                    isLoading={isLoading || !spectrogramUrl}
+                    showMetadata={false}
                   />
-                ) : (
-                  <Skeleton variant="rectangular" height={400} sx={{ borderRadius: 1, mb: 2 }} />
-                )}
+                </Box>
 
                 {/* Custom Audio Player */}
                 <Divider sx={{ mb: 1.5 }} />
