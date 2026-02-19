@@ -98,9 +98,6 @@ SPECTROGRAM_CACHE_DIR = Path(tempfile.gettempdir()) / "bioacoustic_spectrogram_c
 MAX_SPECTROGRAM_CACHE_SIZE_GB = 1
 MAX_SPECTROGRAM_CACHE_SIZE_BYTES = MAX_SPECTROGRAM_CACHE_SIZE_GB * 1024 * 1024 * 1024
 
-# Thread lock for validation database saves (prevents race conditions)
-validation_save_lock = threading.Lock()
-
 def get_spectrogram_cache_key(file_path: str, start: float, end: float, color_mode: str) -> str:
     """Generate unique cache key for a spectrogram including color mode"""
     # Version 2: Clean spectrograms without matplotlib labels/axes
@@ -3044,6 +3041,8 @@ async def preview_training_data(training_audio_folder: str, metadata_path: str):
 @app.post("/api/validation/load-predictions")
 async def load_validation_predictions(request: Request):
     """Load prediction data for validation workflow"""
+    import asyncio
+
     body = await request.json()
     predictions_path = body.get("predictions_path")
     audio_directory = body.get("audio_directory")
@@ -3051,8 +3050,6 @@ async def load_validation_predictions(request: Request):
     format_type = body.get("format_type", "auto")
     recursive = body.get("recursive", True)
     replace_existing = body.get("replace_existing", True)
-    use_pnw_cnet_format = body.get("use_pnw_cnet_format", False)
-    pnw_cnet_strata_field = body.get("pnw_cnet_strata_field", "site_station")
     save_location = body.get("save_location")  # User's specified save location
 
     if not predictions_path or not model_name:
@@ -3061,37 +3058,30 @@ async def load_validation_predictions(request: Request):
     try:
         print(f"DEBUG: Loading predictions from: {predictions_path}")
         print(f"DEBUG: Model name: {model_name}")
-        print(f"DEBUG: PNW-CNet format: {use_pnw_cnet_format}")
         print(f"DEBUG: Audio directory: {audio_directory}")
 
-        # Initialize validation database if not exists, or reinitialize if requested
-        if app_state["validation_db"] is None or replace_existing:
-            print(f"DEBUG: {'Reinitializing' if replace_existing else 'Initializing'} validation database")
+        # Initialize validation database if not exists
+        if app_state["validation_db"] is None:
+            print("DEBUG: Initializing validation database")
             app_state["validation_db"] = vdb.ValidationDB()
+        elif replace_existing:
+            # Reuse existing instance, but wait for pending saves
+            print("DEBUG: Reusing validation database instance, clearing data")
+            app_state["validation_db"].wait_for_pending_save()
 
         validation_db = app_state["validation_db"]
 
-        # Check if PNW-CNet format should be used
-        if use_pnw_cnet_format:
-            print(f"DEBUG: Using PNW-CNet loader with strata field: {pnw_cnet_strata_field}")
-            # Use PNW-CNet specific loader
-            result = validation_db.load_pnw_cnet_predictions(
-                file_path=predictions_path,
-                model_name=model_name,
-                audio_directory=audio_directory,
-                replace_existing=False,  # We already cleared at the DB level if needed
-                strata_field=pnw_cnet_strata_field
-            )
-        else:
-            print(f"DEBUG: Using standard CSV loader with format: {format_type}")
-            # Load predictions from CSV file(s) using standard format
-            result = validation_db.load_predictions_from_csv(
-                file_path=predictions_path,
-                format_type=format_type,
-                model_name=model_name,
-                audio_directory=audio_directory,
-                replace_existing=False  # We already cleared at the DB level if needed
-            )
+        # Load predictions from CSV file(s) using standard format
+        # Run blocking I/O operation in thread pool to avoid blocking event loop
+        print(f"DEBUG: Using standard CSV loader with format: {format_type}")
+        result = await asyncio.to_thread(
+            validation_db.load_predictions_from_csv,
+            file_path=predictions_path,
+            format_type=format_type,
+            model_name=model_name,
+            audio_directory=audio_directory,
+            replace_existing=False  # We already cleared at the DB level if needed
+        )
 
         print(f"DEBUG: Load result status: {result.get('status')}")
         if result.get('status') == 'error':
@@ -3120,6 +3110,8 @@ async def load_validation_predictions(request: Request):
 @app.post("/api/validation/load-unvalidated-clips")
 async def load_unvalidated_clips(request: Request):
     """Load unvalidated clips by subdividing audio files into fixed-length windows"""
+    import asyncio
+
     body = await request.json()
     audio_directory = body.get("audio_directory")
     clip_window_length = body.get("clip_window_length", 3.0)
@@ -3136,15 +3128,20 @@ async def load_unvalidated_clips(request: Request):
         raise HTTPException(status_code=400, detail="target_classes is required")
 
     try:
-        # Initialize validation database if not exists, or reinitialize if requested
-        if app_state["validation_db"] is None or replace_existing:
-            print(f"DEBUG: {'Reinitializing' if replace_existing else 'Initializing'} validation database")
+        # Initialize validation database if not exists
+        if app_state["validation_db"] is None:
+            print("DEBUG: Initializing validation database")
             app_state["validation_db"] = vdb.ValidationDB()
+        elif replace_existing:
+            # Reuse existing instance, but wait for pending saves and clear data
+            print("DEBUG: Reusing validation database instance, clearing data")
+            app_state["validation_db"].wait_for_pending_save()
 
         validation_db = app_state["validation_db"]
 
-        # Load unvalidated clips
-        result = validation_db.load_unvalidated_clips(
+        # Run blocking I/O operation in thread pool to avoid blocking event loop
+        result = await asyncio.to_thread(
+            validation_db.load_unvalidated_clips,
             audio_directory=audio_directory,
             clip_window_length=clip_window_length,
             target_classes=target_classes,
@@ -3171,63 +3168,11 @@ async def load_unvalidated_clips(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/validation/load-density-estimation")
-async def load_density_estimation(request: Request):
-    """Load clips for call density estimation using systematic temporal sampling"""
-    body = await request.json()
-    audio_directory = body.get("audio_directory")
-    clip_length = body.get("clip_length", 3.0)
-    target_class = body.get("target_class")
-    sampling_interval = body.get("sampling_interval", 60)
-    clips_per_interval = body.get("clips_per_interval", 5)
-    replace_existing = body.get("replace_existing", True)
-    save_location = body.get("save_location")  # User's specified save location
-
-    if not audio_directory:
-        raise HTTPException(status_code=400, detail="audio_directory is required")
-
-    if not target_class:
-        raise HTTPException(status_code=400, detail="target_class is required")
-
-    try:
-        # Initialize validation database if not exists, or reinitialize if requested
-        if app_state["validation_db"] is None or replace_existing:
-            print(f"DEBUG: {'Reinitializing' if replace_existing else 'Initializing'} validation database")
-            app_state["validation_db"] = vdb.ValidationDB()
-
-        validation_db = app_state["validation_db"]
-
-        # Load density estimation clips
-        result = validation_db.load_density_estimation_clips(
-            audio_directory=audio_directory,
-            clip_length=clip_length,
-            target_class=target_class,
-            sampling_interval=sampling_interval,
-            clips_per_interval=clips_per_interval,
-            replace_existing=False  # We already cleared at the DB level if needed
-        )
-
-        if result.get('status') == 'error':
-            return result
-
-        # Set project path for future auto-saves if save location is provided
-        if save_location and save_location.strip():
-            validation_db.project_base_path = save_location.strip()
-            # Don't save yet - wait for strata creation
-            print(f"DEBUG: Set project save location to {save_location}. Saving deferred until strata creation.")
-        else:
-            # Warn user that work won't be saved
-            result['no_save_location'] = True
-            print("WARNING: No save location specified - validations will NOT be saved!")
-
-        return result
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.post("/api/validation/create-strata")
 async def create_validation_strata(request: Request):
     """Create validation strata using user-provided strata column"""
+    import asyncio
+
     try:
         # Optional JSON body parsing (for future extensibility)
         try:
@@ -3243,7 +3188,8 @@ async def create_validation_strata(request: Request):
         # Get confidence threshold from request body if provided
         confidence_threshold = body.get('confidence_threshold', 0.0)
 
-        result = validation_db.create_strata(confidence_threshold=confidence_threshold)
+        # Run potentially blocking DataFrame operations in thread pool
+        result = await asyncio.to_thread(validation_db.create_strata, confidence_threshold=confidence_threshold)
 
         return result
 
@@ -3253,12 +3199,16 @@ async def create_validation_strata(request: Request):
 @app.get("/api/validation/strata")
 async def get_validation_strata():
     """Get list of available validation strata"""
+    import asyncio
+
     try:
         if app_state["validation_db"] is None:
             return {"strata": []}
 
         validation_db = app_state["validation_db"]
-        strata_summary = validation_db.get_strata_summary()
+
+        # Run potentially blocking DataFrame operations in thread pool
+        strata_summary = await asyncio.to_thread(validation_db.get_strata_summary)
 
         return {"strata": strata_summary}
 
@@ -3268,48 +3218,54 @@ async def get_validation_strata():
 @app.get("/api/validation/strata/{strata_id}/species")
 async def get_strata_species(strata_id: str):
     """Get species available in a specific strata"""
+    import asyncio
+
     try:
         if app_state["validation_db"] is None:
             return {"species": []}
 
         validation_db = app_state["validation_db"]
 
-        # Filter species for the specific strata
-        species_data = validation_db.validation_progress_df.filter(
-            pl.col("strata_id") == strata_id
-        ).select([
-            "species_name",
-            "total_clips",
-            "confirmed_clips"
-        ])
+        # Run potentially blocking DataFrame operations in thread pool
+        def get_species_data():
+            species_data = validation_db.validation_progress_df.filter(
+                pl.col("strata_id") == strata_id
+            ).select([
+                "species_name",
+                "total_clips",
+                "confirmed_clips"
+            ])
+            return species_data.to_dicts()
 
-        return {"species": species_data.to_dicts()}
+        species = await asyncio.to_thread(get_species_data)
+
+        return {"species": species}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-def get_overall_validation_stats():
+async def get_overall_validation_stats():
     """Helper to calculate overall strata-level progress and total annotations"""
     if app_state["validation_db"] is None:
         return None
-    
+
     db = app_state["validation_db"]
     progress_df = db.validation_progress_df
-    
+
     if len(progress_df) == 0:
         return {
             "total_strata_species": 0,
             "completed_strata_species": 0,
             "total_validated": len(db.validation_annotations_df)
         }
-    
+
     # A combination is completed if confirmed_clips >= target_confirmations
     # OR if validated_clips == total_clips (all reviewed)
     completed = progress_df.filter(
         (pl.col("confirmed_clips") >= pl.col("target_confirmations")) |
         (pl.col("validated_clips") == pl.col("total_clips"))
     )
-    
+
     return {
         "total_strata_species": len(progress_df),
         "completed_strata_species": len(completed),
@@ -3337,6 +3293,11 @@ async def start_validation_session(request: Request):
             raise HTTPException(status_code=400, detail="No validation data loaded")
 
         validation_db = app_state["validation_db"]
+
+        # Wait for any pending saves before starting new session
+        print("INFO: Ensuring database is saved before starting new validation session")
+        validation_db.wait_for_pending_save()
+
         print(f"DEBUG: validation_db found, predictions_df has {len(validation_db.predictions_df)} rows")
 
         # Get predictions for this strata and species
@@ -3495,7 +3456,7 @@ async def start_validation_session(request: Request):
             "status": "success",
             "validation_queue": predictions.to_dicts(),
             "session_progress": progress_row,
-            "overall_progress": get_overall_validation_stats()
+            "overall_progress": await get_overall_validation_stats()
         }
 
     except Exception as e:
@@ -3526,282 +3487,269 @@ async def submit_validation_annotation(request: Request):
 
         validation_db = app_state["validation_db"]
 
-        # Get the original prediction
-        t1 = time.time()
-        prediction = validation_db.predictions_df.filter(
-            pl.col("prediction_id") == prediction_id
-        ).row(0, named=True)
-        print(f"PERF: submit_annotation - get prediction in {(time.time() - t1)*1000:.1f}ms")
+        # Acquire lock to prevent dataframe access during save
+        lock_acquired = False
+        try:
+            validation_db.acquire_lock()
+            lock_acquired = True
 
-        # Check for existing annotation to handle updates
-        t1 = time.time()
-        existing_annotation = validation_db.validation_annotations_df.filter(
-            pl.col("prediction_id") == prediction_id
-        )
-        print(f"PERF: submit_annotation - check existing in {(time.time() - t1)*1000:.1f}ms")
-        
-        previous_state = None
-        if len(existing_annotation) > 0:
-            # Get previous state for stats update
-            previous_state = existing_annotation["validation_state"][0]
-            print(f"DEBUG: Updating existing annotation. Previous state: {previous_state}")
-            
-            # Remove old annotation
-            validation_db.validation_annotations_df = validation_db.validation_annotations_df.filter(
-                pl.col("prediction_id") != prediction_id
+            # Get the original prediction
+            t1 = time.time()
+            prediction = validation_db.predictions_df.filter(
+                pl.col("prediction_id") == prediction_id
+            ).row(0, named=True)
+            print(f"PERF: submit_annotation - get prediction in {(time.time() - t1)*1000:.1f}ms")
+
+            # Check for existing annotation to handle updates
+            t1 = time.time()
+            existing_annotation = validation_db.validation_annotations_df.filter(
+                pl.col("prediction_id") == prediction_id
             )
+            print(f"PERF: submit_annotation - check existing in {(time.time() - t1)*1000:.1f}ms")
 
-        # Create new annotation
-        import uuid
-        annotation_id = str(uuid.uuid4())
-        current_time = datetime.now()
+            previous_state = None
+            if len(existing_annotation) > 0:
+                # Get previous state for stats update
+                previous_state = existing_annotation["validation_state"][0]
+                print(f"DEBUG: Updating existing annotation. Previous state: {previous_state}")
 
-        new_annotation = pl.DataFrame({
-            "annotation_id": [annotation_id],
-            "prediction_id": [prediction_id],
-            "filename": [prediction["filename"]],
-            "start_time": [float(prediction["start_time"])],
-            "end_time": [float(prediction["end_time"])],
-            "species_name": [prediction["species_name"]],
-            "original_confidence": [float(prediction["confidence"])],
-            "validation_state": [validation_state],
-            "validation_confidence": [validation_confidence],
-            "annotator_id": ["user"],  # Could be made dynamic
-            "validated_at": [current_time],
-            "strata_id": [prediction["strata_id"]],
-            "notes": [notes]
-        }, schema={
-            "annotation_id": pl.Utf8,
-            "prediction_id": pl.Utf8,
-            "filename": pl.Utf8,
-            "start_time": pl.Float32,
-            "end_time": pl.Float32,
-            "species_name": pl.Utf8,
-            "original_confidence": pl.Float32,
-            "validation_state": pl.Utf8,
-            "validation_confidence": pl.Int32,
-            "annotator_id": pl.Utf8,
-            "validated_at": pl.Datetime,
-            "strata_id": pl.Utf8,
-            "notes": pl.Utf8
-        })
+                # Remove old annotation
+                validation_db.validation_annotations_df = validation_db.validation_annotations_df.filter(
+                    pl.col("prediction_id") != prediction_id
+                )
 
-        # Add to annotations database
-        t1 = time.time()
-        validation_db.validation_annotations_df = pl.concat([
-            validation_db.validation_annotations_df, new_annotation
-        ])
-        print(f"PERF: submit_annotation - concat annotation in {(time.time() - t1)*1000:.1f}ms")
+            # Create new annotation
+            import uuid
+            annotation_id = str(uuid.uuid4())
+            current_time = datetime.now()
 
-        # Update progress tracking
-        t1 = time.time()
-        if strata_id and species_name:
-            # Get current progress
-            current_progress = validation_db.validation_progress_df.filter(
-                (pl.col("strata_id") == strata_id) &
-                (pl.col("species_name") == species_name)
-            )
+            new_annotation = pl.DataFrame({
+                "annotation_id": [annotation_id],
+                "prediction_id": [prediction_id],
+                "filename": [prediction["filename"]],
+                "start_time": [float(prediction["start_time"])],
+                "end_time": [float(prediction["end_time"])],
+                "species_name": [prediction["species_name"]],
+                "original_confidence": [float(prediction["confidence"])],
+                "validation_state": [validation_state],
+                "validation_confidence": [validation_confidence],
+                "annotator_id": ["user"],  # Could be made dynamic
+                "validated_at": [current_time],
+                "strata_id": [prediction["strata_id"]],
+                "notes": [notes]
+            }, schema={
+                "annotation_id": pl.Utf8,
+                "prediction_id": pl.Utf8,
+                "filename": pl.Utf8,
+                "start_time": pl.Float32,
+                "end_time": pl.Float32,
+                "species_name": pl.Utf8,
+                "original_confidence": pl.Float32,
+                "validation_state": pl.Utf8,
+                "validation_confidence": pl.Int32,
+                "annotator_id": pl.Utf8,
+                "validated_at": pl.Datetime,
+                "strata_id": pl.Utf8,
+                "notes": pl.Utf8
+            })
 
-            if len(current_progress) > 0:
-                # Update counts based on validation state
-                updates = {"last_updated": current_time}
-                
-                # First, revert previous state counts if updating
-                if previous_state:
-                    if previous_state == "confirmed":
-                        updates["confirmed_clips"] = current_progress["confirmed_clips"].item() - 1
-                    elif previous_state == "rejected":
-                        updates["rejected_clips"] = current_progress["rejected_clips"].item() - 1
-                    elif previous_state == "uncertain":
-                        updates["uncertain_clips"] = current_progress["uncertain_clips"].item() - 1
-                    elif previous_state == "skipped":
-                        updates["skipped_clips"] = current_progress["skipped_clips"].item() - 1
-                    
-                    updates["validated_clips"] = current_progress["validated_clips"].item() - 1
-                    
-                    # Apply decrements to current_progress reference for the increments below
-                    # (Note: This is a simplified in-memory update for the logic below, 
-                    # actual DB update happens at the end)
-                    for key, val in updates.items():
-                        if key != "last_updated":
-                            # We need to manually update the item in our logic reference
-                            # But since we are building an 'updates' dict, we can just use the values from 'updates'
-                            # if they exist, or fall back to current_progress.
-                            # However, 'updates' accumulates changes.
-                            pass
+            # Add to annotations database
+            t1 = time.time()
+            validation_db.validation_annotations_df = pl.concat([
+                validation_db.validation_annotations_df, new_annotation
+            ])
+            print(f"PERF: submit_annotation - concat annotation in {(time.time() - t1)*1000:.1f}ms")
 
-                # Calculate base values for incrementing (handle if they were just decremented)
-                def get_base_value(key):
-                    if key in updates:
-                        return updates[key]
-                    return current_progress[key].item()
+            # Update progress tracking
+            t1 = time.time()
+            if strata_id and species_name:
+                # Get current progress
+                current_progress = validation_db.validation_progress_df.filter(
+                    (pl.col("strata_id") == strata_id) &
+                    (pl.col("species_name") == species_name)
+                )
 
-                # Now increment for new state
-                if validation_state == "confirmed":
-                    updates["confirmed_clips"] = get_base_value("confirmed_clips") + 1
-                elif validation_state == "rejected":
-                    updates["rejected_clips"] = get_base_value("rejected_clips") + 1
-                elif validation_state == "uncertain":
-                    updates["uncertain_clips"] = get_base_value("uncertain_clips") + 1
-                elif validation_state == "skipped":
-                    updates["skipped_clips"] = get_base_value("skipped_clips") + 1
+                if len(current_progress) > 0:
+                    # Update counts based on validation state
+                    updates = {"last_updated": current_time}
 
-                updates["validated_clips"] = get_base_value("validated_clips") + 1
+                    # First, revert previous state counts if updating
+                    if previous_state:
+                        if previous_state == "confirmed":
+                            updates["confirmed_clips"] = current_progress["confirmed_clips"].item() - 1
+                        elif previous_state == "rejected":
+                            updates["rejected_clips"] = current_progress["rejected_clips"].item() - 1
+                        elif previous_state == "uncertain":
+                            updates["uncertain_clips"] = current_progress["uncertain_clips"].item() - 1
+                        elif previous_state == "skipped":
+                            updates["skipped_clips"] = current_progress["skipped_clips"].item() - 1
 
-                # Check if target met
-                target_confirmations = current_progress["target_confirmations"].item()
-                target_met = updates.get("confirmed_clips", current_progress["confirmed_clips"].item()) >= target_confirmations
+                        updates["validated_clips"] = current_progress["validated_clips"].item() - 1
 
-                # Update the progress record
-                mask = (pl.col("strata_id") == strata_id) & (pl.col("species_name") == species_name)
-                for field, value in updates.items():
-                    # Cast integer values to Int32 to match schema
-                    if isinstance(value, int):
-                        lit_value = pl.lit(value, dtype=pl.Int32)
-                    else:
-                        lit_value = pl.lit(value)
-                    validation_db.validation_progress_df = validation_db.validation_progress_df.with_columns(
-                        pl.when(mask).then(lit_value).otherwise(pl.col(field)).alias(field)
-                    )
+                        # Apply decrements to current_progress reference for the increments below
+                        # (Note: This is a simplified in-memory update for the logic below,
+                        # actual DB update happens at the end)
+                        for key, val in updates.items():
+                            if key != "last_updated":
+                                # We need to manually update the item in our logic reference
+                                # But since we are building an 'updates' dict, we can just use the values from 'updates'
+                                # if they exist, or fall back to current_progress.
+                                # However, 'updates' accumulates changes.
+                                pass
 
-                # Get updated progress for current strata and species-wide
-                t2 = time.time()
-                try:
-                    current_strata_progress = validation_db.validation_progress_df.filter(mask)
-                    species_progress = validation_db.validation_progress_df.filter(
-                        pl.col("species_name") == species_name
-                    )
+                    # Calculate base values for incrementing (handle if they were just decremented)
+                    def get_base_value(key):
+                        if key in updates:
+                            return updates[key]
+                        return current_progress[key].item()
 
-                    if len(current_strata_progress) > 0 and len(species_progress) > 0:
-                        # Current strata data
-                        current_strata_row = current_strata_progress.row(0, named=True)
+                    # Now increment for new state
+                    if validation_state == "confirmed":
+                        updates["confirmed_clips"] = get_base_value("confirmed_clips") + 1
+                    elif validation_state == "rejected":
+                        updates["rejected_clips"] = get_base_value("rejected_clips") + 1
+                    elif validation_state == "uncertain":
+                        updates["uncertain_clips"] = get_base_value("uncertain_clips") + 1
+                    elif validation_state == "skipped":
+                        updates["skipped_clips"] = get_base_value("skipped_clips") + 1
 
-                        # Combine current strata data with species-wide aggregation
-                        updated_progress = {
-                            # Current strata data (used for counts display)
-                            "strata_id": strata_id,
-                            "strata_name": current_strata_row["strata_name"],
-                            "species_name": species_name,
-                            "total_clips": int(current_strata_row["total_clips"]),
-                            "validated_clips": int(current_strata_row["validated_clips"]),
-                            "confirmed_clips": int(current_strata_row["confirmed_clips"]),
-                            "rejected_clips": int(current_strata_row["rejected_clips"]),
-                            "uncertain_clips": int(current_strata_row["uncertain_clips"]),
-                            "skipped_clips": int(current_strata_row["skipped_clips"]),
-                            "target_confirmations": int(current_strata_row["target_confirmations"]),
-                            "is_completed": bool(current_strata_row["is_completed"]),
-                            "last_updated": current_strata_row["last_updated"],
-                            # Species-wide aggregated data (used for progress bar)
-                            "total_strata": len(species_progress),
-                            "completed_strata": int(species_progress["is_completed"].sum()),
-                            "species_total_clips": int(species_progress["total_clips"].sum()),
-                            "species_validated_clips": int(species_progress["validated_clips"].sum()),
-                        }
-                    elif len(current_strata_progress) > 0:
-                        # Fallback: just current strata data, add empty species-wide fields
-                        current_strata_row = current_strata_progress.row(0, named=True)
-                        updated_progress = {
-                            "strata_id": strata_id,
-                            "strata_name": current_strata_row["strata_name"],
-                            "species_name": species_name,
-                            "total_clips": int(current_strata_row["total_clips"]),
-                            "validated_clips": int(current_strata_row["validated_clips"]),
-                            "confirmed_clips": int(current_strata_row["confirmed_clips"]),
-                            "rejected_clips": int(current_strata_row["rejected_clips"]),
-                            "uncertain_clips": int(current_strata_row["uncertain_clips"]),
-                            "skipped_clips": int(current_strata_row["skipped_clips"]),
-                            "target_confirmations": int(current_strata_row["target_confirmations"]),
-                            "is_completed": bool(current_strata_row["is_completed"]),
-                            "last_updated": current_strata_row["last_updated"],
-                            "total_strata": 1,
-                            "completed_strata": 0,
-                            "species_total_clips": int(current_strata_row["total_clips"]),
-                            "species_validated_clips": int(current_strata_row["validated_clips"]),
-                        }
-                    else:
-                        updated_progress = None
-                        print("WARNING: No current_strata_progress found!")
-                except Exception as e:
-                    print(f"ERROR building updated_progress: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    updated_progress = None
+                    updates["validated_clips"] = get_base_value("validated_clips") + 1
 
-                print(f"PERF: submit_annotation - progress aggregation in {(time.time() - t2)*1000:.1f}ms")
-                print(f"PERF: submit_annotation - total progress update in {(time.time() - t1)*1000:.1f}ms")
+                    # Check if target met
+                    target_confirmations = current_progress["target_confirmations"].item()
+                    target_met = updates.get("confirmed_clips", current_progress["confirmed_clips"].item()) >= target_confirmations
 
-                # Auto-save after annotation (non-blocking with lock)
-                def save_in_background():
-                    # Acquire lock to prevent concurrent saves
-                    acquired = validation_save_lock.acquire(blocking=False)
-                    if not acquired:
-                        print(f"INFO: Save already in progress, skipping concurrent save for {species_name}")
-                        return
-
-                    try:
-                        print(f"INFO: Starting auto-save for {species_name} in strata {strata_id}")
-                        save_start = time.time()
-                        auto_save_success = validation_db.auto_save()
-                        save_duration = (time.time() - save_start) * 1000
-
-                        if not auto_save_success:
-                            print("WARNING: Auto-save failed - annotations only in memory!")
-                            print(f"WARNING: project_base_path={validation_db.project_base_path}, project_name={validation_db.project_name}")
+                    # Update the progress record
+                    mask = (pl.col("strata_id") == strata_id) & (pl.col("species_name") == species_name)
+                    for field, value in updates.items():
+                        # Cast integer values to Int32 to match schema
+                        if isinstance(value, int):
+                            lit_value = pl.lit(value, dtype=pl.Int32)
                         else:
-                            print(f"INFO: Auto-saved in {save_duration:.1f}ms for {species_name} in strata {strata_id}")
+                            lit_value = pl.lit(value)
+                        validation_db.validation_progress_df = validation_db.validation_progress_df.with_columns(
+                            pl.when(mask).then(lit_value).otherwise(pl.col(field)).alias(field)
+                        )
+
+                    # Get updated progress for current strata and species-wide
+                    t2 = time.time()
+                    try:
+                        current_strata_progress = validation_db.validation_progress_df.filter(mask)
+                        species_progress = validation_db.validation_progress_df.filter(
+                            pl.col("species_name") == species_name
+                        )
+
+                        if len(current_strata_progress) > 0 and len(species_progress) > 0:
+                            # Current strata data
+                            current_strata_row = current_strata_progress.row(0, named=True)
+
+                            # Combine current strata data with species-wide aggregation
+                            updated_progress = {
+                                # Current strata data (used for counts display)
+                                "strata_id": strata_id,
+                                "strata_name": current_strata_row["strata_name"],
+                                "species_name": species_name,
+                                "total_clips": int(current_strata_row["total_clips"]),
+                                "validated_clips": int(current_strata_row["validated_clips"]),
+                                "confirmed_clips": int(current_strata_row["confirmed_clips"]),
+                                "rejected_clips": int(current_strata_row["rejected_clips"]),
+                                "uncertain_clips": int(current_strata_row["uncertain_clips"]),
+                                "skipped_clips": int(current_strata_row["skipped_clips"]),
+                                "target_confirmations": int(current_strata_row["target_confirmations"]),
+                                "is_completed": bool(current_strata_row["is_completed"]),
+                                "last_updated": current_strata_row["last_updated"],
+                                # Species-wide aggregated data (used for progress bar)
+                                "total_strata": len(species_progress),
+                                "completed_strata": int(species_progress["is_completed"].sum()),
+                                "species_total_clips": int(species_progress["total_clips"].sum()),
+                                "species_validated_clips": int(species_progress["validated_clips"].sum()),
+                            }
+                        elif len(current_strata_progress) > 0:
+                            # Fallback: just current strata data, add empty species-wide fields
+                            current_strata_row = current_strata_progress.row(0, named=True)
+                            updated_progress = {
+                                "strata_id": strata_id,
+                                "strata_name": current_strata_row["strata_name"],
+                                "species_name": species_name,
+                                "total_clips": int(current_strata_row["total_clips"]),
+                                "validated_clips": int(current_strata_row["validated_clips"]),
+                                "confirmed_clips": int(current_strata_row["confirmed_clips"]),
+                                "rejected_clips": int(current_strata_row["rejected_clips"]),
+                                "uncertain_clips": int(current_strata_row["uncertain_clips"]),
+                                "skipped_clips": int(current_strata_row["skipped_clips"]),
+                                "target_confirmations": int(current_strata_row["target_confirmations"]),
+                                "is_completed": bool(current_strata_row["is_completed"]),
+                                "last_updated": current_strata_row["last_updated"],
+                                "total_strata": 1,
+                                "completed_strata": 0,
+                                "species_total_clips": int(current_strata_row["total_clips"]),
+                                "species_validated_clips": int(current_strata_row["validated_clips"]),
+                            }
+                        else:
+                            updated_progress = None
+                            print("WARNING: No current_strata_progress found!")
                     except Exception as e:
-                        print(f"WARNING: Auto-save exception: {e}")
-                    finally:
-                        validation_save_lock.release()
+                        print(f"ERROR building updated_progress: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        updated_progress = None
 
-                save_thread = threading.Thread(target=save_in_background, daemon=True)
-                save_thread.start()
+                    print(f"PERF: submit_annotation - progress aggregation in {(time.time() - t2)*1000:.1f}ms")
+                    print(f"PERF: submit_annotation - total progress update in {(time.time() - t1)*1000:.1f}ms")
+                    print(f"PERF: submit_annotation - TOTAL TIME: {(time.time() - start_time)*1000:.1f}ms")
 
-                t_stats = time.time()
-                overall_stats = get_overall_validation_stats()
-                print(f"PERF: submit_annotation - get_overall_stats in {(time.time() - t_stats)*1000:.1f}ms")
-                print(f"PERF: submit_annotation - TOTAL TIME: {(time.time() - start_time)*1000:.1f}ms")
+                    # Store updated progress and target_met before releasing lock
+                    has_progress_tracking = True
+                    stored_updated_progress = updated_progress
+                    stored_target_met = target_met
+                else:
+                    # No progress tracking
+                    has_progress_tracking = False
 
-                return {
-                    "status": "success",
-                    "session_progress": updated_progress,
-                    "overall_progress": overall_stats,
-                    "target_met": target_met
-                }
+        finally:
+            # Ensure lock is always released if we acquired it
+            if lock_acquired:
+                try:
+                    validation_db.release_lock()
+                except Exception as e:
+                    print(f"ERROR: Failed to release lock: {e}")
 
-        # Auto-save after annotation (non-blocking with lock, even if no progress tracking)
-        def save_in_background():
-            # Acquire lock to prevent concurrent saves
-            acquired = validation_save_lock.acquire(blocking=False)
-            if not acquired:
-                print("INFO: Save already in progress, skipping concurrent save (no progress tracking)")
-                return
+        # Now that lock is released, get overall stats (can access dataframes safely)
+        t_stats = time.time()
+        overall_stats = await get_overall_validation_stats()
+        print(f"PERF: submit_annotation - get_overall_stats in {(time.time() - t_stats)*1000:.1f}ms")
 
-            try:
-                print("INFO: Starting auto-save (no progress tracking)")
-                save_start = time.time()
-                validation_db.auto_save()
-                save_duration = (time.time() - save_start) * 1000
-                print(f"INFO: Auto-saved in {save_duration:.1f}ms (no progress tracking)")
-            except Exception as e:
-                print(f"WARNING: Auto-save exception: {e}")
-            finally:
-                validation_save_lock.release()
+        # Request auto-save via smart queue (non-blocking, outside lock)
+        validation_db.auto_save()
 
-        save_thread = threading.Thread(target=save_in_background, daemon=True)
-        save_thread.start()
+        # Build result based on whether we had progress tracking
+        if has_progress_tracking:
+            result = {
+                "status": "success",
+                "session_progress": stored_updated_progress,
+                "overall_progress": overall_stats,
+                "target_met": stored_target_met
+            }
+        else:
+            result = {
+                "status": "success",
+                "overall_progress": overall_stats
+            }
 
-        return {
-            "status": "success",
-            "overall_progress": get_overall_validation_stats()
-        }
+        return result
 
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"ERROR in submit_annotation: {e}")
+        print(f"ERROR traceback:\n{error_details}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/validation/summary")
 async def get_validation_summary():
     """Get overall validation summary statistics"""
+    import asyncio
+
     try:
         if app_state["validation_db"] is None:
             return {
@@ -3818,38 +3766,43 @@ async def get_validation_summary():
 
         validation_db = app_state["validation_db"]
 
-        # Calculate summary statistics
-        total_predictions = len(validation_db.predictions_df)
-        total_annotations = len(validation_db.validation_annotations_df)
-        total_strata = validation_db.strata_definitions_df["strata_id"].n_unique()
-        total_species = validation_db.predictions_df["species_name"].n_unique()
+        # Run potentially blocking DataFrame operations in thread pool
+        def compute_summary():
+            # Calculate summary statistics
+            total_predictions = len(validation_db.predictions_df)
+            total_annotations = len(validation_db.validation_annotations_df)
+            total_strata = validation_db.strata_definitions_df["strata_id"].n_unique()
+            total_species = validation_db.predictions_df["species_name"].n_unique()
 
-        # Count by validation state
-        if total_annotations > 0:
-            validation_counts = validation_db.validation_annotations_df.group_by("validation_state").agg(
-                pl.count().alias("count")
-            ).to_dict(as_series=False)
+            # Count by validation state
+            if total_annotations > 0:
+                validation_counts = validation_db.validation_annotations_df.group_by("validation_state").agg(
+                    pl.count().alias("count")
+                ).to_dict(as_series=False)
 
-            state_counts = {
-                state: count
-                for state, count in zip(validation_counts["validation_state"], validation_counts["count"])
+                state_counts = {
+                    state: count
+                    for state, count in zip(validation_counts["validation_state"], validation_counts["count"])
+                }
+            else:
+                state_counts = {}
+
+            completion_percentage = (total_annotations / total_predictions * 100) if total_predictions > 0 else 0
+
+            return {
+                "total_strata": total_strata,
+                "total_species": total_species,
+                "total_predictions": total_predictions,
+                "total_annotations": total_annotations,
+                "confirmed_count": state_counts.get("confirmed", 0),
+                "rejected_count": state_counts.get("rejected", 0),
+                "uncertain_count": state_counts.get("uncertain", 0),
+                "skipped_count": state_counts.get("skipped", 0),
+                "completion_percentage": completion_percentage
             }
-        else:
-            state_counts = {}
 
-        completion_percentage = (total_annotations / total_predictions * 100) if total_predictions > 0 else 0
-
-        return {
-            "total_strata": total_strata,
-            "total_species": total_species,
-            "total_predictions": total_predictions,
-            "total_annotations": total_annotations,
-            "confirmed_count": state_counts.get("confirmed", 0),
-            "rejected_count": state_counts.get("rejected", 0),
-            "uncertain_count": state_counts.get("uncertain", 0),
-            "skipped_count": state_counts.get("skipped", 0),
-            "completion_percentage": completion_percentage
-        }
+        summary = await asyncio.to_thread(compute_summary)
+        return summary
 
     except Exception as e:
         import traceback
@@ -3860,36 +3813,44 @@ async def get_validation_summary():
 @app.get("/api/validation/strata-progress")
 async def get_strata_progress():
     """Get detailed progress for all strata"""
+    import asyncio
+
     try:
         if app_state["validation_db"] is None:
             return {"strata_progress": []}
 
         validation_db = app_state["validation_db"]
 
-        # Join progress data with strata definitions to get confidence_threshold
-        progress_df = validation_db.validation_progress_df.join(
-            validation_db.strata_definitions_df.select(['strata_id', 'confidence_threshold']),
-            on='strata_id',
-            how='left'
-        )
-        progress_data = progress_df.to_dicts()
+        # Run potentially blocking DataFrame operations in thread pool
+        def compute_progress():
+            # Join progress data with strata definitions to get confidence_threshold
+            progress_df = validation_db.validation_progress_df.join(
+                validation_db.strata_definitions_df.select(['strata_id', 'confidence_threshold']),
+                on='strata_id',
+                how='left'
+            )
+            progress_data = progress_df.to_dicts()
 
-        # Add completion_status to each record based on target_confirmations
-        for record in progress_data:
-            confirmed = record.get('confirmed_clips', 0)
-            target = record.get('target_confirmations', 1)
-            validated = record.get('validated_clips', 0)
-            total = record.get('total_clips', 0)
+            # Add completion_status to each record based on target_confirmations
+            for record in progress_data:
+                confirmed = record.get('confirmed_clips', 0)
+                target = record.get('target_confirmations', 1)
+                validated = record.get('validated_clips', 0)
+                total = record.get('total_clips', 0)
 
-            # If no clips above threshold, mark as target_met (nothing to validate)
-            if total == 0:
-                record['completion_status'] = 'target_met'
-            elif confirmed >= target:
-                record['completion_status'] = 'target_met'
-            elif validated > 0:
-                record['completion_status'] = 'in_progress'
-            else:
-                record['completion_status'] = 'not_started'
+                # If no clips above threshold, mark as target_met (nothing to validate)
+                if total == 0:
+                    record['completion_status'] = 'target_met'
+                elif confirmed >= target:
+                    record['completion_status'] = 'target_met'
+                elif validated > 0:
+                    record['completion_status'] = 'in_progress'
+                else:
+                    record['completion_status'] = 'not_started'
+
+            return progress_data
+
+        progress_data = await asyncio.to_thread(compute_progress)
 
         return {"strata_progress": progress_data}
 
@@ -3899,6 +3860,8 @@ async def get_strata_progress():
 @app.post("/api/validation/toggle-strata-completion")
 async def toggle_strata_completion(request: Request):
     """Toggle completion status for a strata/species combination"""
+    import asyncio
+
     try:
         body = await request.json()
         strata_id = body.get("strata_id")
@@ -3912,36 +3875,17 @@ async def toggle_strata_completion(request: Request):
             raise HTTPException(status_code=400, detail="No validation database loaded")
 
         validation_db = app_state["validation_db"]
-        result = validation_db.toggle_strata_completion(strata_id, species_name, is_completed)
+
+        # Run potentially blocking DataFrame operations in thread pool
+        result = await asyncio.to_thread(validation_db.toggle_strata_completion, strata_id, species_name, is_completed)
 
         if result['status'] == 'error':
             raise HTTPException(status_code=400, detail=result['message'])
 
-        # Auto-save after toggling completion (non-blocking with lock)
-        if validation_db.project_base_path:
-            def save_in_background():
-                # Acquire lock to prevent concurrent saves
-                acquired = validation_save_lock.acquire(blocking=False)
-                if not acquired:
-                    print(f"INFO: Save already in progress, skipping completion toggle save for {species_name}")
-                    return
-
-                try:
-                    print(f"INFO: Starting auto-save after completion toggle for {species_name}")
-                    save_start = time.time()
-                    validation_db.save_validation_database(
-                        base_path=validation_db.project_base_path,
-                        project_name=validation_db.project_name
-                    )
-                    save_duration = (time.time() - save_start) * 1000
-                    print(f"INFO: Auto-saved in {save_duration:.1f}ms after toggling completion for {species_name} in strata {strata_id}")
-                except Exception as e:
-                    print(f"WARNING: Auto-save failed after toggling completion: {e}")
-                finally:
-                    validation_save_lock.release()
-
-            save_thread = threading.Thread(target=save_in_background, daemon=True)
-            save_thread.start()
+        # Request auto-save and WAIT for completion when toggling strata completion
+        validation_db.auto_save()
+        print("INFO: Waiting for save to complete after toggling strata completion")
+        validation_db.wait_for_pending_save()
 
         return result
 
@@ -4108,6 +4052,8 @@ async def export_validation_results(
 @app.post("/api/validation/save-project")
 async def save_validation_project(request: Request):
     """Save validation project to disk for later loading"""
+    import asyncio
+
     try:
         body = await request.json()
     except:
@@ -4131,7 +4077,8 @@ async def save_validation_project(request: Request):
                 # Default to current working directory
                 base_path = "."
 
-        result = validation_db.save_validation_database(base_path, project_name)
+        # Run blocking I/O operation in thread pool to avoid blocking event loop
+        result = await asyncio.to_thread(validation_db.save_validation_database, base_path, project_name)
 
         return result
 
@@ -4141,6 +4088,8 @@ async def save_validation_project(request: Request):
 @app.post("/api/validation/load-project")
 async def load_validation_project(request: Request):
     """Load validation project from disk"""
+    import asyncio
+
     body = await request.json()
     project_path = body.get("project_path")
 
@@ -4148,13 +4097,21 @@ async def load_validation_project(request: Request):
         raise HTTPException(status_code=400, detail="project_path is required")
 
     try:
-        # Initialize new validation database if needed
+        from modules.validation_db import ValidationDB
+
+        # Create or reuse validation database instance
         if app_state["validation_db"] is None:
-            from modules.validation_db import ValidationDB
+            print("INFO: Creating new validation database instance")
             app_state["validation_db"] = ValidationDB()
+        else:
+            # Reuse existing instance - just wait for any pending saves
+            print("INFO: Reusing existing validation database instance")
+            app_state["validation_db"].wait_for_pending_save()
 
         validation_db = app_state["validation_db"]
-        result = validation_db.load_validation_database(project_path)
+
+        # Run blocking I/O operation in thread pool to avoid blocking event loop
+        result = await asyncio.to_thread(validation_db.load_validation_database, project_path)
 
         return result
 
@@ -4164,13 +4121,20 @@ async def load_validation_project(request: Request):
 @app.get("/api/validation/list-projects")
 async def list_validation_projects(base_path: str):
     """List available validation projects in a directory"""
+    import asyncio
+
     if not base_path:
         raise HTTPException(status_code=400, detail="base_path is required")
 
     try:
         from modules.validation_db import ValidationDB
         temp_db = ValidationDB()  # Create temporary instance for listing
-        result = temp_db.list_validation_projects(base_path)
+
+        # Run blocking I/O operation in thread pool to avoid blocking event loop
+        result = await asyncio.to_thread(temp_db.list_validation_projects, base_path)
+
+        # Shutdown the temporary worker thread to prevent accumulation
+        temp_db.shutdown_save_worker()
 
         return result
 
@@ -4247,6 +4211,30 @@ async def validation_diagnostic():
             "status": "error",
             "message": str(e),
             "traceback": traceback.format_exc()
+        }
+
+@app.get("/api/validation/save-status")
+async def validation_save_status():
+    """Get status of smart queue save system"""
+    try:
+        if app_state["validation_db"] is None:
+            return {
+                "status": "no_database",
+                "message": "No validation database loaded"
+            }
+
+        validation_db = app_state["validation_db"]
+        save_status = validation_db.get_save_status()
+
+        return {
+            "status": "success",
+            **save_status
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
         }
 
 @app.get("/api/audio/{file_path:path}")

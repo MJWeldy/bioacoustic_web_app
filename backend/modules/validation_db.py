@@ -9,11 +9,18 @@ import json
 import re
 import librosa
 import soundfile as sf
+import threading
+import time
 
 class ValidationDB:
     """
     Simple validation database that expects user-provided strata column.
     Much simpler than the complex temporal/spatial grouping approach.
+
+    Includes smart queue system for non-blocking saves:
+    - Saves happen in background thread
+    - Multiple save requests collapse into single save of latest state
+    - Thread-safe with locking to prevent corruption
     """
 
     def __init__(self):
@@ -22,6 +29,13 @@ class ValidationDB:
         # Project save location tracking
         self.project_base_path = None
         self.project_name = None
+
+        # Smart queue system for non-blocking saves
+        self._save_pending = False  # Flag indicating save is needed
+        self._save_lock = threading.Lock()  # Prevents concurrent saves AND dataframe modifications
+        self._shutdown = False  # Flag to stop worker thread
+        self._save_worker_thread = None  # Background thread for saves
+        self._start_save_worker()  # Start the background worker
 
         # Predictions table - stores classifier predictions
         self.predictions_df = pl.DataFrame(
@@ -87,6 +101,229 @@ class ValidationDB:
                 'last_updated': pl.Datetime   # Last progress update
             }
         )
+
+    def acquire_lock(self):
+        """Acquire the database lock for thread-safe operations."""
+        self._save_lock.acquire()
+
+    def release_lock(self):
+        """Release the database lock."""
+        self._save_lock.release()
+
+    def _start_save_worker(self):
+        """Start the background worker thread for smart queue saves."""
+        if self._save_worker_thread is None or not self._save_worker_thread.is_alive():
+            self._shutdown = False
+            self._save_worker_thread = threading.Thread(target=self._save_worker, daemon=True)
+            self._save_worker_thread.start()
+            print("INFO: Smart queue save worker started")
+
+    def _save_worker(self):
+        """
+        Background worker that processes save requests.
+
+        Smart queue logic:
+        - Waits for save_pending flag
+        - When set, clones small dataframes and captures references
+        - Releases lock BEFORE writing to disk (non-blocking)
+        - After save, checks if another save is needed (state changed during save)
+        - This ensures latest state is always saved without queuing all intermediate states
+        """
+        while not self._shutdown:
+            # Check if save is needed
+            if self._save_pending:
+                # Acquire lock BRIEFLY to capture current state
+                with self._save_lock:
+                    # Reset flag before saving (new changes during save will re-set it)
+                    self._save_pending = False
+
+                    # Clone small dataframes that change frequently (fast operation)
+                    # These are cloned so we can write them after releasing the lock
+                    annotations_snapshot = self.validation_annotations_df.clone()
+                    progress_snapshot = self.validation_progress_df.clone()
+
+                    # Just capture references for large dataframes that rarely change
+                    # (they'll only be written if files don't exist yet)
+                    predictions_snapshot = self.predictions_df
+                    strata_defs_snapshot = self.strata_definitions_df
+
+                    # Capture project info
+                    base_path = self.project_base_path
+                    proj_name = self.project_name
+
+                # Lock is released here! Annotations can continue while we write to disk
+
+                # Perform the actual save WITHOUT holding the lock
+                if base_path and proj_name:
+                    try:
+                        save_start = time.time()
+                        result = self._save_dataframes_to_disk(
+                            base_path,
+                            proj_name,
+                            predictions_snapshot,
+                            annotations_snapshot,
+                            strata_defs_snapshot,
+                            progress_snapshot
+                        )
+                        save_duration = (time.time() - save_start) * 1000
+
+                        if result.get('status') == 'success':
+                            print(f"INFO: Smart queue auto-save completed in {save_duration:.1f}ms")
+                        else:
+                            print(f"WARNING: Smart queue auto-save failed: {result.get('message')}")
+                    except Exception as e:
+                        print(f"ERROR: Smart queue auto-save exception: {e}")
+
+                # After save completes, check if another save is needed
+                # (state may have changed during save operation)
+                if self._save_pending:
+                    print("INFO: State changed during save, will save again")
+                    continue
+
+            # Sleep briefly to avoid busy-waiting
+            time.sleep(0.1)
+
+        print("INFO: Smart queue save worker stopped")
+
+    def _save_dataframes_to_disk(
+        self,
+        base_path: str,
+        project_name: str,
+        predictions_df,
+        annotations_df,
+        strata_defs_df,
+        progress_df
+    ) -> Dict[str, Any]:
+        """
+        Write dataframes to disk without holding the lock.
+
+        This is called by the background worker with cloned/snapshot dataframes.
+        """
+        from pathlib import Path
+        from datetime import datetime
+        import json
+
+        try:
+            base_dir = Path(base_path)
+            project_dir = base_dir / project_name
+            project_dir.mkdir(parents=True, exist_ok=True)
+
+            # Define file paths
+            predictions_path = project_dir / "predictions.parquet"
+            annotations_path = project_dir / "annotations.parquet"
+            strata_defs_path = project_dir / "strata_definitions.parquet"
+            progress_path = project_dir / "validation_progress.parquet"
+            metadata_path = project_dir / "project_metadata.json"
+
+            # Save dataframes (only if they have data)
+            # Predictions and strata_defs: only write if file doesn't exist
+            # (they don't change during validation, only during initial load)
+            if len(predictions_df) > 0 and not predictions_path.exists():
+                predictions_df.write_parquet(predictions_path)
+
+            # Annotations and progress: always write (they change frequently)
+            if len(annotations_df) > 0:
+                annotations_df.write_parquet(annotations_path)
+
+            if len(strata_defs_df) > 0 and not strata_defs_path.exists():
+                strata_defs_df.write_parquet(strata_defs_path)
+
+            if len(progress_df) > 0:
+                progress_df.write_parquet(progress_path)
+
+            # Update metadata (read existing if present to preserve created_at)
+            existing_metadata = {}
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, 'r') as f:
+                        existing_metadata = json.load(f)
+                except:
+                    pass
+
+            metadata = {
+                "project_name": project_name,
+                "created_at": existing_metadata.get("created_at", datetime.now().isoformat()),
+                "last_saved": datetime.now().isoformat(),
+                "total_predictions": len(predictions_df),
+                "total_annotations": len(annotations_df),
+                "total_strata": len(strata_defs_df),
+            }
+
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            return {
+                'status': 'success',
+                'message': 'Validation database saved successfully',
+                'project_path': str(project_dir)
+            }
+
+        except Exception as e:
+            import traceback
+            return {
+                'status': 'error',
+                'message': f'Failed to save validation database: {str(e)}',
+                'traceback': traceback.format_exc()
+            }
+
+    def wait_for_pending_save(self, timeout: float = 10.0) -> bool:
+        """
+        Wait for any pending save operation to complete.
+
+        Args:
+            timeout: Maximum time to wait in seconds
+
+        Returns:
+            True if save completed or no save pending, False if timeout
+        """
+        if not self._save_pending:
+            return True
+
+        print("INFO: Waiting for pending save to complete...")
+        start_time = time.time()
+
+        while self._save_pending and (time.time() - start_time) < timeout:
+            time.sleep(0.1)
+
+        if self._save_pending:
+            print(f"WARNING: Save did not complete within {timeout}s timeout")
+            return False
+        else:
+            print("INFO: Pending save completed")
+            return True
+
+    def shutdown_save_worker(self):
+        """Stop the background save worker thread gracefully."""
+        if not self._save_worker_thread:
+            return
+
+        self._shutdown = True
+
+        # Always wait for thread to finish
+        if self._save_worker_thread.is_alive():
+            if self._save_pending:
+                print("INFO: Waiting for final save to complete...")
+            self._save_worker_thread.join(timeout=10)
+            if self._save_worker_thread.is_alive():
+                print("WARNING: Save worker thread did not stop within timeout")
+            else:
+                print("INFO: Smart queue save worker shutdown complete")
+
+        # Clear thread reference
+        self._save_worker_thread = None
+
+    def get_save_status(self) -> Dict[str, Any]:
+        """
+        Get current status of the smart queue save system.
+
+        Returns:
+            Dict with save_pending flag and worker status
+        """
+        return {
+            'save_pending': self._save_pending,
+            'worker_alive': self._save_worker_thread.is_alive() if self._save_worker_thread else False,
+            'project_configured': bool(self.project_base_path and self.project_name)
+        }
 
     def load_predictions_from_csv(self,
                                   file_path: str,
@@ -185,6 +422,9 @@ class ValidationDB:
                 'created_at': [current_time] * len(df_long)
             })
 
+            # Ensure current predictions_df schema is correct before concat
+            self._ensure_schema_compliance()
+
             # Append to existing predictions
             self.predictions_df = pl.concat([self.predictions_df, predictions_new])
             
@@ -229,6 +469,88 @@ class ValidationDB:
                 'status': 'error',
                 'message': str(e)
             }
+
+    def _ensure_schema_compliance(self):
+        """Ensure all dataframes have the expected columns and types."""
+        # Define expected schemas
+        schemas = {
+            'predictions_df': {
+                'prediction_id': pl.Utf8,
+                'filename': pl.Utf8,
+                'start_time': pl.Float32,
+                'end_time': pl.Float32,
+                'species_name': pl.Utf8,
+                'confidence': pl.Float32,
+                'model_name': pl.Utf8,
+                'audio_file_path': pl.Utf8,
+                'strata_id': pl.Utf8,
+                'strata': pl.Utf8,
+                'created_at': pl.Datetime
+            },
+            'validation_annotations_df': {
+                'annotation_id': pl.Utf8,
+                'prediction_id': pl.Utf8,
+                'filename': pl.Utf8,
+                'start_time': pl.Float32,
+                'end_time': pl.Float32,
+                'species_name': pl.Utf8,
+                'original_confidence': pl.Float32,
+                'validation_state': pl.Utf8,
+                'validation_confidence': pl.Int32,
+                'annotator_id': pl.Utf8,
+                'validated_at': pl.Datetime,
+                'strata_id': pl.Utf8,
+                'notes': pl.Utf8
+            },
+            'strata_definitions_df': {
+                'strata_id': pl.Utf8,
+                'strata_name': pl.Utf8,
+                'strata_type': pl.Utf8,
+                'confidence_threshold': pl.Float32,
+                'created_at': pl.Datetime
+            },
+            'validation_progress_df': {
+                'strata_id': pl.Utf8,
+                'strata_name': pl.Utf8,
+                'species_name': pl.Utf8,
+                'total_clips': pl.Int32,
+                'validated_clips': pl.Int32,
+                'confirmed_clips': pl.Int32,
+                'rejected_clips': pl.Int32,
+                'uncertain_clips': pl.Int32,
+                'skipped_clips': pl.Int32,
+                'target_confirmations': pl.Int32,
+                'is_completed': pl.Boolean,
+                'last_updated': pl.Datetime
+            }
+        }
+
+        for df_name, schema in schemas.items():
+            df = getattr(self, df_name)
+            modified = False
+            
+            for col_name, col_type in schema.items():
+                if col_name not in df.columns:
+                    # Add missing column with nulls/defaults
+                    if col_type == pl.Boolean:
+                        default_val = False
+                    elif col_type in [pl.Int32, pl.Int64]:
+                        default_val = 0
+                    elif col_type in [pl.Float32, pl.Float64]:
+                        default_val = 0.0
+                    else:
+                        default_val = None
+                        
+                    df = df.with_columns(pl.lit(default_val).alias(col_name).cast(col_type))
+                    modified = True
+                else:
+                    # Ensure correct type
+                    if df.schema[col_name] != col_type:
+                        df = df.with_columns(pl.col(col_name).cast(col_type))
+                        modified = True
+            
+            if modified:
+                setattr(self, df_name, df)
 
     def _detect_format(self, df: pl.DataFrame) -> str:
         """Detect if CSV is in wide or long format."""
@@ -333,383 +655,6 @@ class ValidationDB:
         print(f"DEBUG: Linked {linked_count}/{len(filenames)} audio files")
 
         return audio_paths
-
-    def _parse_pnw_cnet_filename(self, filename: str) -> Optional[Dict[str, Any]]:
-        """
-        Parse PNW-CNet filename format used by NWFP acoustic monitoring program.
-
-        Filename format: JCN_40758-12_20220614_123409_part_001.png
-        - JCN: 3-letter study region code
-        - 40758: 5-digit sampling site
-        - 12: 2-digit sampling station
-        - 20220614: 8-digit date (YYYYMMDD)
-        - 123409: 6-digit time (HHMMSS)
-        - part_001: part number (12-second windows)
-
-        Args:
-            filename: Filename to parse (with or without extension)
-
-        Returns:
-            Dict with parsed metadata or None if parsing fails
-        """
-        # Remove file extension if present
-        base_name = Path(filename).stem
-
-        # Pattern for PNW-CNet filename format
-        # Region (3 letters) _ Site (5 digits) - Station (1-2 digits) _ Date (8 digits) _ Time (6 digits) _ part _ PartNum (3 digits)
-        pattern = r'^([A-Z]{3})_(\d{5})-(\d{1,2})_(\d{8})_(\d{6})_part_(\d{3})'
-
-        match = re.match(pattern, base_name)
-        if not match:
-            return None
-
-        region = match.group(1)
-        site = match.group(2)
-        station = match.group(3).zfill(2)  # Zero-pad to 2 digits for consistency
-        date_str = match.group(4)  # YYYYMMDD
-        time_str = match.group(5)  # HHMMSS
-        part_num = int(match.group(6))
-
-        # Parse date and time
-        try:
-            year = int(date_str[0:4])
-            month = int(date_str[4:6])
-            day = int(date_str[6:8])
-            hour = int(time_str[0:2])
-            minute = int(time_str[2:4])
-            second = int(time_str[4:6])
-
-            recording_datetime = datetime(year, month, day, hour, minute, second)
-        except ValueError:
-            # Invalid date/time values
-            return None
-
-        # Calculate ISO week number
-        iso_calendar = recording_datetime.isocalendar()
-        week_number = iso_calendar[1]  # Week number (1-53)
-        week_str = f"W{week_number:02d}"
-
-        # Calculate clip start and end times
-        # Each part is a 12-second window
-        # part_001 = 0-12, part_002 = 12-24, etc.
-        clip_start = (part_num - 1) * 12.0
-        clip_end = part_num * 12.0
-
-        # Create site-station identifier and week-based combinations
-        site_station = f"{site}-{station}"
-        region_week = f"{region}-{week_str}"
-        site_week = f"{site}-{week_str}"
-        site_station_week = f"{site_station}-{week_str}"
-
-        return {
-            'region': region,
-            'site': site,
-            'station': station,
-            'site_station': site_station,
-            'date': date_str,
-            'time': time_str,
-            'datetime': recording_datetime,
-            'week_number': week_number,
-            'week_str': week_str,
-            'region_week': region_week,
-            'site_week': site_week,
-            'site_station_week': site_station_week,
-            'part_number': part_num,
-            'clip_start': clip_start,
-            'clip_end': clip_end,
-            'strata': site_station  # Use site-station as default strata
-        }
-
-    def load_pnw_cnet_predictions(self,
-                                   file_path: str,
-                                   model_name: str = 'PNW-CNet',
-                                   audio_directory: str = None,
-                                   replace_existing: bool = False,
-                                   strata_field: str = 'site_station') -> Dict[str, Any]:
-        """
-        Load predictions from PNW-CNet default output format.
-        Parses filenames to extract metadata and calculate clip times.
-        Supports both single files and directories (with recursive search).
-
-        Args:
-            file_path: Path to PNW-CNet predictions CSV file or directory
-            model_name: Name of the model (default: 'PNW-CNet')
-            audio_directory: Directory containing audio files
-            replace_existing: If True, clear existing predictions before loading
-            strata_field: Which field to use for strata ('site_station', 'site', 'region', etc.)
-
-        Returns:
-            Dict with load status and summary statistics
-        """
-        try:
-            # Clear existing predictions if requested
-            if replace_existing:
-                print("DEBUG: Clearing existing predictions")
-                self.predictions_df = pl.DataFrame(
-                    schema={
-                        'prediction_id': pl.Utf8,
-                        'filename': pl.Utf8,
-                        'start_time': pl.Float32,
-                        'end_time': pl.Float32,
-                        'species_name': pl.Utf8,
-                        'confidence': pl.Float32,
-                        'model_name': pl.Utf8,
-                        'audio_file_path': pl.Utf8,
-                        'strata_id': pl.Utf8,
-                        'strata': pl.Utf8,
-                        'created_at': pl.Datetime
-                    }
-                )
-
-            # Check if path is a file or directory
-            path = Path(file_path)
-            csv_files = []
-
-            if not path.exists():
-                raise ValueError(
-                    f"Path does not exist: {file_path}\n"
-                    f"Please check that:\n"
-                    f"1. The path is correct and not a typo\n"
-                    f"2. The directory/file is accessible\n"
-                    f"3. Any network drives are mounted\n"
-                    f"4. You have read permissions for this location"
-                )
-
-            if path.is_file():
-                csv_files = [path]
-                print(f"DEBUG: Loading single file: {file_path}")
-            elif path.is_dir():
-                # Recursively find all CSV files
-                csv_files = list(path.rglob('*.csv'))
-                print(f"DEBUG: Found {len(csv_files)} CSV files in directory: {file_path}")
-            else:
-                raise ValueError(f"Path exists but is neither a file nor a directory: {file_path}")
-
-            if not csv_files:
-                raise ValueError(f"No CSV files found in: {file_path}")
-
-            # Load and combine all CSV files
-            all_dfs = []
-            failed_files = []
-
-            for csv_file in csv_files:
-                try:
-                    df = pl.read_csv(
-                        str(csv_file),
-                        infer_schema_length=10000,
-                        null_values=['', 'null', 'NULL', 'None', 'NaN']
-                    )
-
-                    # Verify it has the Filename column
-                    if 'Filename' in df.columns:
-                        all_dfs.append(df)
-                        print(f"DEBUG: Loaded {len(df)} rows from {csv_file.name}")
-                    else:
-                        print(f"WARNING: Skipping {csv_file.name} - no 'Filename' column")
-                        failed_files.append(str(csv_file))
-
-                except Exception as e:
-                    print(f"WARNING: Failed to load {csv_file.name}: {e}")
-                    failed_files.append(str(csv_file))
-                    continue
-
-            if not all_dfs:
-                error_msg = "No valid PNW-CNet prediction files could be loaded.\n"
-                if failed_files:
-                    error_msg += f"\nFailed to load {len(failed_files)} file(s):\n"
-                    for f in failed_files[:5]:  # Show first 5 failures
-                        error_msg += f"  - {f}\n"
-                    if len(failed_files) > 5:
-                        error_msg += f"  ... and {len(failed_files) - 5} more\n"
-                error_msg += "\nPNW-CNet CSV files must have:\n"
-                error_msg += "  1. A 'Filename' column (case-sensitive, capital F)\n"
-                error_msg += "  2. Species names as additional column headers\n"
-                error_msg += "  3. Confidence values (0-1) in the cells\n"
-                raise ValueError(error_msg)
-
-            # Combine all dataframes
-            if len(all_dfs) == 1:
-                df = all_dfs[0]
-            else:
-                # Concatenate all dataframes, ensuring consistent columns
-                df = pl.concat(all_dfs, how='vertical_relaxed')
-
-            print(f"DEBUG: Combined total: {len(df)} rows and {len(df.columns)} columns")
-            print(f"DEBUG: Columns: {df.columns}")
-
-            # Verify 'Filename' column exists
-            if 'Filename' not in df.columns:
-                raise ValueError("PNW-CNet format requires 'Filename' column")
-
-            # Identify species columns (all columns except 'Filename')
-            species_cols = [col for col in df.columns if col != 'Filename']
-
-            print(f"DEBUG: Identified {len(species_cols)} species columns")
-
-            # Parse filenames and extract metadata
-            parsed_data = []
-            failed_parses = []
-
-            for row in df.iter_rows(named=True):
-                filename = row['Filename']
-                parsed = self._parse_pnw_cnet_filename(filename)
-
-                if parsed is None:
-                    failed_parses.append(filename)
-                    continue
-
-                # Create a record for each species with its confidence
-                for species_name in species_cols:
-                    confidence = row[species_name]
-
-                    # Skip null/NaN values or convert to 0.0
-                    if confidence is None or (isinstance(confidence, float) and np.isnan(confidence)):
-                        confidence = 0.0
-                    else:
-                        confidence = float(confidence)
-
-                    # Select strata value based on strata_field
-                    if strata_field == 'site_station':
-                        strata_value = parsed['site_station']
-                    elif strata_field == 'site':
-                        strata_value = parsed['site']
-                    elif strata_field == 'region':
-                        strata_value = parsed['region']
-                    elif strata_field == 'region_week':
-                        strata_value = parsed['region_week']
-                    elif strata_field == 'site_week':
-                        strata_value = parsed['site_week']
-                    elif strata_field == 'site_station_week':
-                        strata_value = parsed['site_station_week']
-                    else:
-                        strata_value = parsed['site_station']  # default
-
-                    parsed_data.append({
-                        'filename': filename,
-                        'start_time': parsed['clip_start'],
-                        'end_time': parsed['clip_end'],
-                        'species_name': species_name,
-                        'confidence': confidence,
-                        'strata': strata_value,
-                        'region': parsed['region'],
-                        'site': parsed['site'],
-                        'station': parsed['station'],
-                        'site_station': parsed['site_station'],
-                        'recording_date': parsed['date'],
-                        'recording_time': parsed['time'],
-                        'part_number': parsed['part_number']
-                    })
-
-            if failed_parses:
-                print(f"WARNING: Failed to parse {len(failed_parses)} filenames")
-                print(f"First few failures: {failed_parses[:5]}")
-
-            if not parsed_data:
-                error_msg = "No valid data could be parsed from PNW-CNet files.\n"
-                if failed_parses:
-                    error_msg += f"\nFailed to parse {len(failed_parses)} filename(s):\n"
-                    for f in failed_parses[:5]:  # Show first 5 failures
-                        error_msg += f"  - {f}\n"
-                    if len(failed_parses) > 5:
-                        error_msg += f"  ... and {len(failed_parses) - 5} more\n"
-                error_msg += "\nExpected filename format:\n"
-                error_msg += "  REGION_SITE-STATION_YYYYMMDD_HHMMSS_part_NNN.png\n"
-                error_msg += "Example:\n"
-                error_msg += "  JCN_40758-12_20220614_123409_part_001.png\n"
-                error_msg += "\nWhere:\n"
-                error_msg += "  - REGION: 3-letter region code (e.g., JCN)\n"
-                error_msg += "  - SITE: 5-digit site number (e.g., 40758)\n"
-                error_msg += "  - STATION: 1-2 digit station number (e.g., 12)\n"
-                error_msg += "  - DATE: YYYYMMDD format\n"
-                error_msg += "  - TIME: HHMMSS format\n"
-                error_msg += "  - PART: 3-digit part number (e.g., 001)\n"
-                raise ValueError(error_msg)
-
-            # Create dataframe from parsed data
-            df_long = pl.DataFrame(parsed_data)
-
-            # Generate prediction IDs and add metadata
-            prediction_ids = [str(uuid.uuid4()) for _ in range(len(df_long))]
-            current_time = datetime.now()
-
-            # Link audio files if directory provided
-            audio_paths = []
-            if audio_directory:
-                # For PNW-CNet, convert image filenames to audio filenames
-                # Image: JCN_40758-12_20220614_123409_part_001.png
-                # Audio: JCN_40758-12_20220614_123409.wav
-                audio_filenames = []
-                for fn in df_long['filename'].to_list():
-                    # Remove extension and _part_NNN suffix
-                    base_name = Path(fn).stem  # JCN_40758-12_20220614_123409_part_001
-                    # Remove _part_NNN pattern (matches _part_ followed by 3 digits)
-                    audio_base = re.sub(r'_part_\d{3}$', '', base_name)
-                    audio_filenames.append(audio_base + '.wav')
-
-                audio_paths = self._link_audio_files(audio_filenames, audio_directory)
-            else:
-                audio_paths = [''] * len(df_long)
-
-            # Create predictions dataframe
-            predictions_new = pl.DataFrame({
-                'prediction_id': prediction_ids,
-                'filename': df_long['filename'],
-                'start_time': df_long['start_time'].cast(pl.Float32),
-                'end_time': df_long['end_time'].cast(pl.Float32),
-                'species_name': df_long['species_name'],
-                'confidence': df_long['confidence'].cast(pl.Float32),
-                'model_name': [model_name] * len(df_long),
-                'audio_file_path': audio_paths,
-                'strata_id': [''] * len(df_long),
-                'strata': df_long['strata'],
-                'created_at': [current_time] * len(df_long)
-            })
-
-            # Append to existing predictions
-            self.predictions_df = pl.concat([self.predictions_df, predictions_new])
-            
-            # Deduplicate to prevent multiple loads of same data
-            # Keep existing records (first) to preserve prediction_ids and annotation links
-            self.predictions_df = self.predictions_df.unique(
-                subset=['filename', 'start_time', 'end_time', 'species_name', 'model_name'],
-                keep='first'
-            )
-
-            # Generate summary statistics
-            total_predictions = len(predictions_new)
-            unique_files = len(predictions_new['filename'].unique())
-            unique_species = len(predictions_new['species_name'].unique())
-            species_list = sorted(predictions_new['species_name'].unique().to_list())
-            confidence_range = [
-                float(predictions_new['confidence'].min()),
-                float(predictions_new['confidence'].max())
-            ]
-            audio_files_linked = sum(1 for path in audio_paths if path)
-            unique_strata = len(predictions_new['strata'].unique())
-            strata_list = sorted(predictions_new['strata'].unique().to_list())
-
-            return {
-                'status': 'success',
-                'total_predictions': total_predictions,
-                'unique_files': unique_files,
-                'unique_species': unique_species,
-                'species_list': species_list,
-                'confidence_range': confidence_range,
-                'audio_files_linked': audio_files_linked,
-                'format_detected': 'pnw_cnet',
-                'unique_strata': unique_strata,
-                'strata_list': strata_list,
-                'failed_parses': len(failed_parses),
-                'strata_field_used': strata_field,
-                'csv_files_loaded': len(all_dfs),
-                'csv_files_failed': len(failed_files)
-            }
-
-        except Exception as e:
-            return {
-                'status': 'error',
-                'message': str(e)
-            }
 
     def load_unvalidated_clips(self,
                                audio_directory: str,
@@ -868,6 +813,9 @@ class ValidationDB:
                 'created_at': [current_time] * len(df_long)
             })
 
+            # Ensure current predictions_df schema is correct before concat
+            self._ensure_schema_compliance()
+
             # Append to existing predictions
             self.predictions_df = pl.concat([self.predictions_df, predictions_new])
             
@@ -920,173 +868,6 @@ class ValidationDB:
                 'message': str(e)
             }
 
-    def load_density_estimation_clips(self,
-                                      audio_directory: str,
-                                      clip_length: float,
-                                      target_class: str,
-                                      sampling_interval: int = 60,
-                                      clips_per_interval: int = 5,
-                                      replace_existing: bool = False) -> Dict[str, Any]:
-        """
-        Load clips for call density estimation using systematic temporal sampling.
-
-        Args:
-            audio_directory: Directory containing audio files
-            clip_length: Length of each clip in seconds
-            target_class: Target class for density estimation
-            sampling_interval: Time interval for systematic sampling in seconds
-            clips_per_interval: Number of clips to sample per interval
-            replace_existing: If True, clear existing predictions before loading
-
-        Returns:
-            Dict with load status and summary statistics
-        """
-        try:
-            # Clear existing predictions if requested
-            if replace_existing:
-                print("DEBUG: Clearing existing predictions")
-                self.predictions_df = pl.DataFrame(
-                    schema={
-                        'prediction_id': pl.Utf8,
-                        'filename': pl.Utf8,
-                        'start_time': pl.Float32,
-                        'end_time': pl.Float32,
-                        'species_name': pl.Utf8,
-                        'confidence': pl.Float32,
-                        'model_name': pl.Utf8,
-                        'audio_file_path': pl.Utf8,
-                        'strata_id': pl.Utf8,
-                        'strata': pl.Utf8,
-                        'created_at': pl.Datetime
-                    }
-                )
-
-            audio_dir = Path(audio_directory)
-            if not audio_dir.exists():
-                raise ValueError(f"Audio directory not found: {audio_directory}")
-
-            # Find all audio files
-            audio_extensions = ['.wav', '.mp3', '.flac', '.aiff', '.m4a', '.ogg']
-            audio_files = []
-            for ext in audio_extensions:
-                audio_files.extend(audio_dir.rglob(f'*{ext}'))
-
-            if not audio_files:
-                raise ValueError(f"No audio files found in {audio_directory}")
-
-            print(f"DEBUG: Found {len(audio_files)} audio files")
-
-            # Process each audio file
-            parsed_data = []
-            failed_files = []
-            total_clips = 0
-
-            for audio_file in audio_files:
-                try:
-                    # Get audio duration
-                    info = sf.info(str(audio_file))
-                    duration = info.duration
-                    filename = audio_file.name
-
-                    # Calculate number of sampling intervals
-                    num_intervals = int(np.floor(duration / sampling_interval))
-
-                    # Sample clips at regular intervals
-                    for interval_idx in range(num_intervals):
-                        interval_start = interval_idx * sampling_interval
-                        interval_end = min((interval_idx + 1) * sampling_interval, duration)
-
-                        # Sample clips_per_interval clips within this interval
-                        for clip_idx in range(clips_per_interval):
-                            # Evenly distribute clips within the interval
-                            clip_offset = (interval_end - interval_start) / (clips_per_interval + 1) * (clip_idx + 1)
-                            clip_start = interval_start + clip_offset
-
-                            # Ensure clip doesn't exceed file duration
-                            if clip_start + clip_length <= duration:
-                                clip_end = clip_start + clip_length
-                                total_clips += 1
-
-                                parsed_data.append({
-                                    'filename': filename,
-                                    'audio_file_path': str(audio_file),
-                                    'start_time': clip_start,
-                                    'end_time': clip_end,
-                                    'species_name': target_class,
-                                    'confidence': 0.0,  # Unvalidated clips
-                                    'strata': filename  # Use filename as strata for density estimation
-                                })
-
-                except Exception as e:
-                    print(f"WARNING: Failed to process {audio_file}: {e}")
-                    failed_files.append(str(audio_file))
-                    continue
-
-            if not parsed_data:
-                raise ValueError("No valid clips could be generated from audio files")
-
-            print(f"DEBUG: Generated {len(parsed_data)} clips for density estimation")
-
-            # Create dataframe from parsed data
-            df_long = pl.DataFrame(parsed_data)
-
-            # Generate prediction IDs and add metadata
-            prediction_ids = [str(uuid.uuid4()) for _ in range(len(df_long))]
-            current_time = datetime.now()
-
-            # Create predictions dataframe
-            predictions_new = pl.DataFrame({
-                'prediction_id': prediction_ids,
-                'filename': df_long['filename'],
-                'start_time': df_long['start_time'].cast(pl.Float32),
-                'end_time': df_long['end_time'].cast(pl.Float32),
-                'species_name': df_long['species_name'],
-                'confidence': df_long['confidence'].cast(pl.Float32),
-                'model_name': ['density_estimation'] * len(df_long),
-                'audio_file_path': df_long['audio_file_path'],
-                'strata_id': [''] * len(df_long),
-                'strata': df_long['strata'],
-                'created_at': [current_time] * len(df_long)
-            })
-
-            # Append to existing predictions
-            self.predictions_df = pl.concat([self.predictions_df, predictions_new])
-            
-            # Deduplicate to prevent multiple loads of same data
-            # Keep existing records (first) to preserve prediction_ids and annotation links
-            self.predictions_df = self.predictions_df.unique(
-                subset=['filename', 'start_time', 'end_time', 'species_name', 'model_name'],
-                keep='first'
-            )
-
-            # Generate summary statistics
-            total_predictions = len(predictions_new)
-            unique_files = len(predictions_new['filename'].unique())
-
-            return {
-                'status': 'success',
-                'total_predictions': total_predictions,
-                'total_clips': total_clips,
-                'unique_files': unique_files,
-                'unique_species': 1,
-                'species_list': [target_class],
-                'confidence_range': [0.0, 0.0],
-                'audio_files_linked': unique_files,
-                'format_detected': 'density_estimation',
-                'unique_strata': unique_files,
-                'strata_list': sorted(predictions_new['strata'].unique().to_list()),
-                'failed_files': len(failed_files),
-                'clip_length': clip_length,
-                'sampling_interval': sampling_interval,
-                'clips_per_interval': clips_per_interval
-            }
-
-        except Exception as e:
-            return {
-                'status': 'error',
-                'message': str(e)
-            }
-
     def create_strata(self, clear_existing: bool = True, confidence_threshold: float = 0.0) -> Dict[str, Any]:
         """
         Create validation strata using the user-provided strata column.
@@ -1101,6 +882,9 @@ class ValidationDB:
             Summary of created strata
         """
         try:
+            # Ensure schema compliance before operating on dataframes
+            self._ensure_schema_compliance()
+
             if len(self.predictions_df) == 0:
                 return {
                     'status': 'error',
@@ -1131,6 +915,7 @@ class ValidationDB:
                         'uncertain_clips': pl.Int32,
                         'skipped_clips': pl.Int32,
                         'target_confirmations': pl.Int32,
+                        'is_completed': pl.Boolean,
                         'last_updated': pl.Datetime
                     }
                 )
@@ -1204,6 +989,14 @@ class ValidationDB:
                 new_strata_df = new_strata_df.with_columns([
                     pl.col('confidence_threshold').cast(pl.Float32)
                 ])
+                
+                # Robust concatenation: ensure schemas match
+                for col in new_strata_df.columns:
+                    if col not in self.strata_definitions_df.columns:
+                        self.strata_definitions_df = self.strata_definitions_df.with_columns(
+                            pl.lit(None).alias(col).cast(new_strata_df.schema[col])
+                        )
+                
                 self.strata_definitions_df = pl.concat([self.strata_definitions_df, new_strata_df])
 
             # Add progress records to dataframe
@@ -1219,6 +1012,14 @@ class ValidationDB:
                     pl.col('skipped_clips').cast(pl.Int32),
                     pl.col('target_confirmations').cast(pl.Int32)
                 ])
+                
+                # Robust concatenation: ensure schemas match
+                for col in new_progress_df.columns:
+                    if col not in self.validation_progress_df.columns:
+                        self.validation_progress_df = self.validation_progress_df.with_columns(
+                            pl.lit(None).alias(col).cast(new_progress_df.schema[col])
+                        )
+                        
                 self.validation_progress_df = pl.concat([self.validation_progress_df, new_progress_df])
 
             # Generate summary
@@ -1358,10 +1159,19 @@ class ValidationDB:
             if len(self.validation_progress_df) > 0:
                 self.validation_progress_df.write_parquet(progress_path)
 
-            # Save project metadata
+            # Save project metadata (preserve created_at if it exists)
+            existing_metadata = {}
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, 'r') as f:
+                        existing_metadata = json.load(f)
+                except:
+                    pass
+
             metadata = {
                 "project_name": project_name,
-                "created_at": datetime.now().isoformat(),
+                "created_at": existing_metadata.get("created_at", datetime.now().isoformat()),
+                "last_saved": datetime.now().isoformat(),
                 "total_predictions": len(self.predictions_df),
                 "total_annotations": len(self.validation_annotations_df),
                 "total_strata": len(self.strata_definitions_df),
@@ -1397,17 +1207,27 @@ class ValidationDB:
 
     def auto_save(self) -> bool:
         """
-        Automatically save project using stored path (if available).
-        Returns True if save succeeded, False otherwise.
+        Request a non-blocking auto-save via smart queue system.
+
+        Returns True if save was requested, False if no save path configured.
+
+        Smart queue behavior:
+        - Sets save_pending flag immediately and returns
+        - Background worker will save latest state
+        - Multiple rapid calls collapse into single save of most recent state
+        - User can continue annotating without waiting
         """
+        # Ensure worker thread is running
+        if self._save_worker_thread is None or not self._save_worker_thread.is_alive():
+            print("WARNING: Save worker thread not running, restarting...")
+            self._start_save_worker()
+
         if self.project_base_path and self.project_name:
-            try:
-                result = self.save_validation_database(self.project_base_path, self.project_name)
-                return result.get('status') == 'success'
-            except Exception as e:
-                print(f"Auto-save failed: {e}")
-                return False
-        return False
+            self._save_pending = True
+            return True
+        else:
+            print("WARNING: Auto-save requested but no project path configured")
+            return False
 
     def load_validation_database(self, project_path: str) -> Dict[str, Any]:
         """
@@ -1486,10 +1306,17 @@ class ValidationDB:
 
             prog = load_table("validation_progress.parquet", "validation_progress")
             if prog is not None:
-                # Schema migration: add is_completed column if missing
+                # Schema migration: add missing columns if from an older version
                 if 'is_completed' not in prog.columns:
                     prog = prog.with_columns(pl.lit(False).alias('is_completed'))
+                
+                if 'last_updated' not in prog.columns:
+                    prog = prog.with_columns(pl.lit(datetime.now()).alias('last_updated'))
+                    
                 self.validation_progress_df = prog
+
+            # Ensure all schemas are compliant after loading
+            self._ensure_schema_compliance()
 
             return {
                 'status': 'success',
@@ -1523,62 +1350,64 @@ class ValidationDB:
         Returns:
             Dict with status and updated progress
         """
-        try:
-            print(f"DEBUG: toggle_strata_completion called with strata_id={strata_id}, species={species_name}, is_completed={is_completed}")
-            print(f"DEBUG: validation_progress_df has {len(self.validation_progress_df)} rows")
-            print(f"DEBUG: validation_progress_df columns: {self.validation_progress_df.columns}")
+        # Acquire lock for thread-safe dataframe modification
+        with self._save_lock:
+            try:
+                print(f"DEBUG: toggle_strata_completion called with strata_id={strata_id}, species={species_name}, is_completed={is_completed}")
+                print(f"DEBUG: validation_progress_df has {len(self.validation_progress_df)} rows")
+                print(f"DEBUG: validation_progress_df columns: {self.validation_progress_df.columns}")
 
-            # Check if record exists first
-            existing = self.validation_progress_df.filter(
-                (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
-            )
-            print(f"DEBUG: Found {len(existing)} matching records")
+                # Check if record exists first
+                existing = self.validation_progress_df.filter(
+                    (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
+                )
+                print(f"DEBUG: Found {len(existing)} matching records")
 
-            if len(existing) == 0:
+                if len(existing) == 0:
+                    return {
+                        'status': 'error',
+                        'message': f'No progress record found for strata_id={strata_id}, species={species_name}'
+                    }
+
+                # Update completion status for this strata/species
+                self.validation_progress_df = self.validation_progress_df.with_columns(
+                    pl.when(
+                        (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
+                    )
+                    .then(pl.lit(is_completed))
+                    .otherwise(pl.col('is_completed'))
+                    .alias('is_completed'),
+
+                    pl.when(
+                        (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
+                    )
+                    .then(pl.lit(datetime.now()))
+                    .otherwise(pl.col('last_updated'))
+                    .alias('last_updated')
+                )
+
+                # Get updated progress record
+                progress_record = self.validation_progress_df.filter(
+                    (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
+                )
+
+                progress_dict = progress_record.to_dicts()[0]
+                print(f"DEBUG: Updated progress record: {progress_dict}")
+
                 return {
-                    'status': 'error',
-                    'message': f'No progress record found for strata_id={strata_id}, species={species_name}'
+                    'status': 'success',
+                    'message': f'Strata marked as {"complete" if is_completed else "incomplete"}',
+                    'progress': progress_dict
                 }
 
-            # Update completion status for this strata/species
-            self.validation_progress_df = self.validation_progress_df.with_columns(
-                pl.when(
-                    (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
-                )
-                .then(pl.lit(is_completed))
-                .otherwise(pl.col('is_completed'))
-                .alias('is_completed'),
-
-                pl.when(
-                    (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
-                )
-                .then(pl.lit(datetime.now()))
-                .otherwise(pl.col('last_updated'))
-                .alias('last_updated')
-            )
-
-            # Get updated progress record
-            progress_record = self.validation_progress_df.filter(
-                (pl.col('strata_id') == strata_id) & (pl.col('species_name') == species_name)
-            )
-
-            progress_dict = progress_record.to_dicts()[0]
-            print(f"DEBUG: Updated progress record: {progress_dict}")
-
-            return {
-                'status': 'success',
-                'message': f'Strata marked as {"complete" if is_completed else "incomplete"}',
-                'progress': progress_dict
-            }
-
-        except Exception as e:
-            import traceback
-            print(f"ERROR in toggle_strata_completion: {str(e)}")
-            print(f"ERROR traceback:\n{traceback.format_exc()}")
-            return {
-                'status': 'error',
-                'message': f'Failed to update completion status: {str(e)}'
-            }
+            except Exception as e:
+                import traceback
+                print(f"ERROR in toggle_strata_completion: {str(e)}")
+                print(f"ERROR traceback:\n{traceback.format_exc()}")
+                return {
+                    'status': 'error',
+                    'message': f'Failed to update completion status: {str(e)}'
+                }
 
     def list_validation_projects(self, base_path: str) -> Dict[str, Any]:
         """
@@ -1607,8 +1436,8 @@ class ValidationDB:
                                 metadata = json.load(f)
 
                             projects.append({
-                                'project_name': metadata.get('project_name'),
-                                'created_at': metadata.get('created_at'),
+                                'project_name': metadata.get('project_name', item.name),
+                                'created_at': metadata.get('created_at', metadata.get('last_saved', '')),
                                 'project_path': str(item),
                                 'total_predictions': metadata.get('total_predictions', 0),
                                 'total_annotations': metadata.get('total_annotations', 0),
@@ -1618,8 +1447,8 @@ class ValidationDB:
                             # Skip invalid metadata files
                             continue
 
-            # Sort by creation date (newest first)
-            projects.sort(key=lambda x: x['created_at'], reverse=True)
+            # Sort by creation date (newest first), handling None values
+            projects.sort(key=lambda x: x.get('created_at') or '', reverse=True)
 
             return {
                 'status': 'success',

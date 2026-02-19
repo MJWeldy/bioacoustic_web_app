@@ -132,7 +132,6 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
           model_name: modelName,
           format_type: formatType,
           recursive: recursive,
-          use_pnw_cnet_format: false,
           save_location: saveLocation.trim() || null
         });
       }

@@ -189,8 +189,18 @@ const ValidationInterface = ({ isActive = true }) => {
         toast.success(`Project loaded: ${response.data.project_name}`);
         setShowLoadModal(false);
         loadAvailableStrata();
+      } else {
+        // API returned an error status
+        const errorMsg = response.data.message || 'Unknown error';
+        console.error('Project load failed:', errorMsg);
+        toast.error(`Failed to load project: ${errorMsg}`);
       }
-    } catch (error) { toast.error('Failed to load project'); } 
+    } catch (error) {
+      // Network or other error
+      const errorMsg = error.response?.data?.message || error.message || 'Network error';
+      console.error('Project load error:', error);
+      toast.error(`Failed to load project: ${errorMsg}`);
+    }
     finally { setIsLoading(false); }
   };
 
