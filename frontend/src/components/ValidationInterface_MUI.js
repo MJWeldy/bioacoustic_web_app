@@ -260,6 +260,23 @@ const ValidationInterface = ({ isActive = true }) => {
     finally { setIsSaving(false); }
   };
 
+  const saveSpectrogram = () => {
+    if (!spectrogramUrl) return;
+    const link = document.createElement('a');
+    link.href = spectrogramUrl;
+    link.download = `spectrogram_${currentClip?.clip_id || 'clip'}.png`;
+    link.click();
+  };
+
+  const saveAudio = () => {
+    if (!currentClip) return;
+    const audioUrl = `/api/audio/${currentClip.audio_file_path}?clip_start=${currentClip.start_time || 0}&clip_end=${currentClip.end_time || 0}`;
+    const link = document.createElement('a');
+    link.href = audioUrl;
+    link.download = `audio_${currentClip.clip_id || 'clip'}.wav`;
+    link.click();
+  };
+
   const toggleStrataCompletion = async (isCompleted) => {
     if (!selectedStrata || !selectedSpecies) {
       toast.error('No active validation session');
@@ -834,6 +851,24 @@ const ValidationInterface = ({ isActive = true }) => {
                         }
                         action={
                             <Stack direction="row" spacing={1}>
+                                <Button
+                                    variant="outlined"
+                                    size="small"
+                                    onClick={saveSpectrogram}
+                                    startIcon={<SaveIcon />}
+                                    disabled={!spectrogramUrl}
+                                >
+                                    Save Image
+                                </Button>
+                                <Button
+                                    variant="outlined"
+                                    size="small"
+                                    onClick={saveAudio}
+                                    startIcon={<SaveIcon />}
+                                    disabled={!currentClip}
+                                >
+                                    Save Audio
+                                </Button>
                                 <Button
                                     variant="outlined"
                                     size="small"

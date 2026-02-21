@@ -666,6 +666,15 @@ const ActiveLearning = ({ isActive = true }) => {
     link.click();
   };
 
+  const saveAudio = () => {
+    if (!currentClip) return;
+    const audioUrl = `/api/audio/${encodeURIComponent(currentClip.file_path)}?clip_start=${currentClip.clip_start}&clip_end=${currentClip.clip_end}`;
+    const link = document.createElement('a');
+    link.href = audioUrl;
+    link.download = `audio_${currentClip.clip_id || 'clip'}.wav`;
+    link.click();
+  };
+
   // Effects
   useEffect(() => {
     if (currentClip && colorMode) {
@@ -1106,15 +1115,26 @@ const ActiveLearning = ({ isActive = true }) => {
                   <Typography variant="h6" sx={{ fontWeight: 600 }}>
                     Spectrogram
                   </Typography>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={saveSpectrogram}
-                    startIcon={<SaveIcon />}
-                    disabled={!spectrogramUrl}
-                  >
-                    SAVE IMAGE
-                  </Button>
+                  <Stack direction="row" spacing={1}>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={saveSpectrogram}
+                      startIcon={<SaveIcon />}
+                      disabled={!spectrogramUrl}
+                    >
+                      SAVE IMAGE
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={saveAudio}
+                      startIcon={<SaveIcon />}
+                      disabled={!currentClip}
+                    >
+                      SAVE AUDIO
+                    </Button>
+                  </Stack>
                 </Stack>
 
                 {/* Spectrogram Viewer */}

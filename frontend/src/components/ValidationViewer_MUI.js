@@ -102,6 +102,19 @@ const ValidationViewer = ({ isActive = true }) => {
   }, [selectedView, selectedStrata, selectedSpecies, currentPage]);
 
   const exportResults = async (format = 'csv') => {
+    // Export strata summary when on strata view
+    if (selectedView === 'strata') {
+      exportStrataData(format);
+      return;
+    }
+
+    // For overview, export strata data as well (summary view)
+    if (selectedView === 'overview') {
+      exportStrataData(format);
+      return;
+    }
+
+    // Export detailed annotations for annotations view
     try {
       const response = await axios.get(`/api/validation/export/${format}`, {
         params: {
@@ -119,6 +132,62 @@ const ValidationViewer = ({ isActive = true }) => {
       link.remove();
       toast.success(`Exported as ${format.toUpperCase()}`);
     } catch (error) { toast.error('Export failed'); }
+  };
+
+  const exportStrataData = (format = 'csv') => {
+    if (format === 'csv') {
+      // Create CSV from strata progress data
+      const headers = ['Strata', 'Species', 'Status', 'Confirmed', 'Rejected', 'Uncertain', 'Skipped', 'Validated', 'Total'];
+      const rows = filteredStrataProgress.map(row => [
+        row.strata_name,
+        row.species_name,
+        row.completion_status,
+        row.confirmed_clips,
+        row.rejected_clips,
+        row.uncertain_clips || 0,
+        row.skipped_clips || 0,
+        row.validated_clips,
+        row.total_clips
+      ]);
+
+      const csvContent = [
+        headers.join(','),
+        ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+      ].join('\n');
+
+      const blob = new Blob([csvContent], { type: 'text/csv' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', 'strata_summary.csv');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success('Exported strata summary as CSV');
+    } else if (format === 'json') {
+      // Export as JSON
+      const jsonData = filteredStrataProgress.map(row => ({
+        strata_name: row.strata_name,
+        species_name: row.species_name,
+        completion_status: row.completion_status,
+        confirmed_clips: row.confirmed_clips,
+        rejected_clips: row.rejected_clips,
+        uncertain_clips: row.uncertain_clips || 0,
+        skipped_clips: row.skipped_clips || 0,
+        validated_clips: row.validated_clips,
+        total_clips: row.total_clips
+      }));
+
+      const blob = new Blob([JSON.stringify(jsonData, null, 2)], { type: 'application/json' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', 'strata_summary.json');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success('Exported strata summary as JSON');
+    }
   };
 
   // Helper functions
