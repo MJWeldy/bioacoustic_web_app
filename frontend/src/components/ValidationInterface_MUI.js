@@ -72,6 +72,7 @@ const ValidationInterface = ({ isActive = true }) => {
   // Session mode
   const [sessionMode, setSessionMode] = useState('validate');
   const [selectionStrategy, setSelectionStrategy] = useState('top_down');
+  const [validationStatusFilter, setValidationStatusFilter] = useState('all'); // Filter by validation status
 
   // Current validation state
   const [currentClip, setCurrentClip] = useState(null);
@@ -228,6 +229,16 @@ const ValidationInterface = ({ isActive = true }) => {
 
     setIsLoading(true);
     try {
+      // Map validation status filter to array of statuses
+      let statusFilterArray = null;
+      if (validationStatusFilter !== 'all') {
+        if (validationStatusFilter === 'unvalidated') {
+          statusFilterArray = ['unvalidated'];
+        } else {
+          statusFilterArray = [validationStatusFilter];
+        }
+      }
+
       const response = await axios.post('/api/validation/start-session', {
         strata_id: strataId,
         species_name: speciesName,
@@ -237,7 +248,8 @@ const ValidationInterface = ({ isActive = true }) => {
             auto_advance: Boolean(validationRules.auto_advance)
         },
         review_mode: sessionMode === 'review',
-        selection_strategy: selectionStrategy
+        selection_strategy: selectionStrategy,
+        validation_status_filter: statusFilterArray
       });
 
       if (response.data.status === 'success') {
@@ -669,6 +681,19 @@ const ValidationInterface = ({ isActive = true }) => {
                                     <MenuItem value="bottom_up">Bottom-Up (Confidence)</MenuItem>
                                     <MenuItem value="sequential">Sequential (Time Order)</MenuItem>
                                     <MenuItem value="random">Random</MenuItem>
+                                </Select>
+                            </FormControl>
+                        </Grid>
+                        <Grid item xs={6} md={3}>
+                            <FormControl size="small" fullWidth>
+                                <InputLabel>Status Filter</InputLabel>
+                                <Select value={validationStatusFilter} label="Status Filter" onChange={(e) => setValidationStatusFilter(e.target.value)}>
+                                    <MenuItem value="all">All Clips</MenuItem>
+                                    <MenuItem value="unvalidated">Not Validated</MenuItem>
+                                    <MenuItem value="confirmed">Confirmed</MenuItem>
+                                    <MenuItem value="rejected">Rejected</MenuItem>
+                                    <MenuItem value="uncertain">Uncertain</MenuItem>
+                                    <MenuItem value="skipped">Skipped</MenuItem>
                                 </Select>
                             </FormControl>
                         </Grid>

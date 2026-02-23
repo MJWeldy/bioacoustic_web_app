@@ -3269,7 +3269,8 @@ async def start_validation_session(request: Request):
     validation_rules = body.get("validation_rules", {})
     review_mode = body.get("review_mode", False)
     selection_strategy = body.get("selection_strategy", "top_down")
-    print(f"DEBUG: Request params - strata_id={strata_id}, species={species_name}, rules={validation_rules}, review_mode={review_mode}, strategy={selection_strategy}")
+    validation_status_filter = body.get("validation_status_filter", None)  # e.g., ['confirmed', 'rejected']
+    print(f"DEBUG: Request params - strata_id={strata_id}, species={species_name}, rules={validation_rules}, review_mode={review_mode}, strategy={selection_strategy}, status_filter={validation_status_filter}")
 
     if not strata_id or not species_name:
         raise HTTPException(status_code=400, detail="strata_id and species_name are required")
@@ -3354,19 +3355,38 @@ async def start_validation_session(request: Request):
         if len(validated_annotations) > 0:
             print(f"DEBUG: Sample validated annotation: {validated_annotations.head(1).to_dicts()}")
 
-        if review_mode:
-            # Review Mode: Filter FOR validated clips
+        # Apply validation status filter if specified
+        if validation_status_filter is not None and len(validation_status_filter) > 0:
+            before_filter = len(predictions)
+            if 'unvalidated' in validation_status_filter:
+                # Special case: include clips without annotations OR with null status
+                other_statuses = [s for s in validation_status_filter if s != 'unvalidated']
+                if other_statuses:
+                    # Include both unvalidated and specific statuses
+                    predictions = predictions.filter(
+                        pl.col("annotation_status").is_null() |
+                        pl.col("annotation_status").is_in(other_statuses)
+                    )
+                else:
+                    # Only unvalidated
+                    predictions = predictions.filter(pl.col("annotation_status").is_null())
+            else:
+                # Filter for specific validation statuses
+                predictions = predictions.filter(pl.col("annotation_status").is_in(validation_status_filter))
+            print(f"DEBUG: After validation status filter {validation_status_filter}: {len(predictions)} (was {before_filter})")
+        elif review_mode:
+            # Review Mode: Filter FOR validated clips (legacy behavior if no status filter)
             before_filter = len(predictions)
             if len(validated_ids) == 0:
                 print("WARNING: Review mode requested but no validated clips found for this strata/species")
             predictions = predictions.filter(pl.col("prediction_id").is_in(validated_ids))
             print(f"DEBUG: Review Mode - After filtering for validated: {len(predictions)} (was {before_filter})")
-            
+
             # Sort by timestamp (newest first) for review
             if "annotation_timestamp" in predictions.columns:
                 predictions = predictions.sort("annotation_timestamp", descending=True)
         else:
-            # Validation Mode: Filter OUT validated clips
+            # Validation Mode: Filter OUT validated clips (legacy behavior if no status filter)
             if validated_ids:
                 before_filter = len(predictions)
                 predictions = predictions.filter(~pl.col("prediction_id").is_in(validated_ids))

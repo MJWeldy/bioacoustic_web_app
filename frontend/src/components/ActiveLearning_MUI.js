@@ -62,6 +62,7 @@ const ActiveLearning = ({ isActive = true }) => {
   const [labelStatistics, setLabelStatistics] = useState(null);
   const [clipLabels, setClipLabels] = useState(null);
   const [reviewMode, setReviewMode] = useState('random');
+  const [annotationStatusFilter, setAnnotationStatusFilter] = useState('unreviewed'); // Filter by annotation status
   const [additionalPositiveClasses, setAdditionalPositiveClasses] = useState([]);
   const [roundProgress, setRoundProgress] = useState(null);
   const [isAnnotating, setIsAnnotating] = useState(false);
@@ -103,6 +104,14 @@ const ActiveLearning = ({ isActive = true }) => {
     { value: 'top_down', label: 'Top-down (Highest Score)' },
     { value: 'top_10+score_quantiles', label: 'Top 10+Score Quantiles (50/round)' },
     { value: 'review_annotated', label: 'Review Annotated Clips' },
+  ];
+
+  const annotationStatusOptions = [
+    { value: 'all', label: 'All Clips' },
+    { value: 'unreviewed', label: 'Not Reviewed' },
+    { value: 'confirmed', label: 'Confirmed (Present)' },
+    { value: 'rejected', label: 'Rejected (Not Present)' },
+    { value: 'uncertain', label: 'Uncertain' },
   ];
 
   // --- Audio Player Handlers ---
@@ -315,10 +324,23 @@ const ActiveLearning = ({ isActive = true }) => {
       if (reviewMode === 'review_annotated') {
         response = await axios.post('/api/active-learning/review-clips');
       } else {
+        // Map annotation status filter to annotation values
+        let annotationFilter = null;
+        if (annotationStatusFilter === 'unreviewed') {
+          annotationFilter = [4];
+        } else if (annotationStatusFilter === 'confirmed') {
+          annotationFilter = [1];
+        } else if (annotationStatusFilter === 'rejected') {
+          annotationFilter = [0];
+        } else if (annotationStatusFilter === 'uncertain') {
+          annotationFilter = [3];
+        }
+        // 'all' means no filter (null)
+
         const filterConfig = {
           score_min: scoreRange[0],
           score_max: scoreRange[1],
-          annotation_filter: [4]
+          annotation_filter: annotationFilter
         };
         response = await axios.post('/api/active-learning/get-clips', filterConfig);
       }
@@ -806,6 +828,21 @@ const ActiveLearning = ({ isActive = true }) => {
                     label="Review Mode"
                   >
                     {reviewModeOptions.map(opt => (
+                      <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>
+                    ))}
+                  </MuiSelect>
+                </FormControl>
+              </Grid>
+
+              <Grid item xs={12} sm={6} md={3}>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Annotation Filter</InputLabel>
+                  <MuiSelect
+                    value={annotationStatusFilter}
+                    onChange={(e) => setAnnotationStatusFilter(e.target.value)}
+                    label="Annotation Filter"
+                  >
+                    {annotationStatusOptions.map(opt => (
                       <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>
                     ))}
                   </MuiSelect>
