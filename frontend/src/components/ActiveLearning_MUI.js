@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { toast } from 'react-toastify';
 import SpectrogramViewer, { formatTime as formatTimeDetailed, formatFreq } from './SpectrogramViewer';
+import SpectrogramOptions from './SpectrogramOptions';
 import {
   Box,
   Card,
@@ -75,6 +76,20 @@ const ActiveLearning = ({ isActive = true }) => {
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
+
+  // Spectrogram options state
+  const [spectrogramOptions, setSpectrogramOptions] = useState({
+    color_mode: 'viridis',
+    freq_scale: 'mel',
+    n_mels: 256,
+    n_fft: 2048,
+    hop_length: 128,
+    window_size: null,
+    fmin: null,  // null means use model default
+    fmax: null,  // null means use model default
+    bandpass_min: null,
+    bandpass_max: null
+  });
 
   const colorModeOptions = [
     { value: 'viridis', label: 'Viridis' },
@@ -370,12 +385,12 @@ const ActiveLearning = ({ isActive = true }) => {
     setIsLoading(true);
 
     try {
-      // Generate spectrogram
+      // Generate spectrogram with all options
       const spectrogramRequest = {
         file_path: clip.file_path,
         clip_start: clip.clip_start,
         clip_end: clip.clip_end,
-        color_mode: colorMode
+        ...spectrogramOptions  // Include all spectrogram options
       };
 
       const spectrogramResponse = await axios.post('/api/spectrogram', spectrogramRequest);
@@ -675,13 +690,13 @@ const ActiveLearning = ({ isActive = true }) => {
     link.click();
   };
 
-  // Effects
+  // Effects - Reload spectrogram when options change
   useEffect(() => {
-    if (currentClip && colorMode) {
+    if (currentClip) {
       loadClip(currentClip);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [colorMode]);
+  }, [spectrogramOptions]);
 
   // Removed automatic loading on scoreRange change - user must click "Start Annotation"
   // useEffect(() => {
@@ -1136,6 +1151,28 @@ const ActiveLearning = ({ isActive = true }) => {
                     </Button>
                   </Stack>
                 </Stack>
+
+                {/* Spectrogram Options */}
+                <SpectrogramOptions
+                  options={spectrogramOptions}
+                  onChange={setSpectrogramOptions}
+                  onReset={() => setSpectrogramOptions({
+                    color_mode: 'viridis',
+                    freq_scale: 'mel',
+                    n_mels: 256,
+                    n_fft: 2048,
+                    hop_length: 128,
+                    window_size: null,
+                    fmin: null,
+                    fmax: null,
+                    bandpass_min: null,
+                    bandpass_max: null
+                  })}
+                  modelDefaults={{
+                    MIN_FREQ: datasetMetadata?.min_freq || 60,
+                    MAX_FREQ: datasetMetadata?.max_freq || 10000
+                  }}
+                />
 
                 {/* Spectrogram Viewer */}
                 <Box sx={{ mb: 2 }}>

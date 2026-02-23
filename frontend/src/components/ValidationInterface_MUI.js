@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { toast } from 'react-toastify';
 import SpectrogramViewer, { formatTime, formatFreq } from './SpectrogramViewer';
+import SpectrogramOptions from './SpectrogramOptions';
 import {
   Box,
   Card,
@@ -96,7 +97,21 @@ const ValidationInterface = ({ isActive = true }) => {
   const [spectrogramUrl, setSpectrogramUrl] = useState(null);
   const [spectrogramMetadata, setSpectrogramMetadata] = useState(null);
   const [colorMode, setColorMode] = useState('viridis');
-  
+
+  // Spectrogram options state
+  const [spectrogramOptions, setSpectrogramOptions] = useState({
+    color_mode: 'viridis',
+    freq_scale: 'mel',
+    n_mels: 256,
+    n_fft: 2048,
+    hop_length: 128,
+    window_size: null,
+    fmin: null,  // null means use model default
+    fmax: null,  // null means use model default
+    bandpass_min: null,
+    bandpass_max: null
+  });
+
   // Hotkeys
   const [hotkeysEnabled, setHotkeysEnabled] = useState(false);
 
@@ -132,12 +147,13 @@ const ValidationInterface = ({ isActive = true }) => {
     }
   }, [currentClip]);
 
-  // Reload spectrogram when color mode changes
+  // Reload spectrogram when spectrogram options change
   useEffect(() => {
     if (currentClip) {
         loadSpectrogram(currentClip);
     }
-  }, [colorMode]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spectrogramOptions]);
 
   // --- API Handlers ---
   const loadAvailableStrata = async () => {
@@ -365,7 +381,7 @@ const ValidationInterface = ({ isActive = true }) => {
             file_path: clipData.audio_file_path,
             clip_start: clipData.start_time || 0,
             clip_end: clipData.end_time || 0,
-            color_mode: colorMode
+            ...spectrogramOptions  // Include all spectrogram options
         });
         if (specRes.data.spectrogram) {
             setSpectrogramUrl(specRes.data.spectrogram);
@@ -891,6 +907,28 @@ const ValidationInterface = ({ isActive = true }) => {
                         }
                     />
                     <CardContent>
+                        {/* Spectrogram Options */}
+                        <SpectrogramOptions
+                          options={spectrogramOptions}
+                          onChange={setSpectrogramOptions}
+                          onReset={() => setSpectrogramOptions({
+                            color_mode: 'viridis',
+                            freq_scale: 'mel',
+                            n_mels: 256,
+                            n_fft: 2048,
+                            hop_length: 128,
+                            window_size: null,
+                            fmin: null,
+                            fmax: null,
+                            bandpass_min: null,
+                            bandpass_max: null
+                          })}
+                          modelDefaults={{
+                            MIN_FREQ: 60,
+                            MAX_FREQ: 10000
+                          }}
+                        />
+
                         {/* Spectrogram Viewer */}
                         <Box sx={{ mb: 2 }}>
                             <SpectrogramViewer

@@ -87,28 +87,45 @@ const SpectrogramViewer = ({
     return ticks;
   };
 
-  // Generate frequency ticks (5 ticks on Y-axis) - Adjusted for Mel scale
+  // Generate frequency ticks (5 ticks on Y-axis) - Adjusted for Mel or Linear scale
   const generateFreqTicks = () => {
     if (!metadata) return [];
-    const { freq_min, freq_max } = metadata;
-    
-    const melMin = hzToMel(freq_min);
-    const melMax = hzToMel(freq_max);
-    
+    const { freq_min, freq_max, freq_scale } = metadata;
+
     const tickCount = 5;
     const ticks = [];
 
-    for (let i = 0; i <= tickCount; i++) {
-      // Evenly spaced in Mel space because that's how the spectrogram is rendered
-      const mel = melMax - (i / tickCount) * (melMax - melMin);
-      const freq = melToHz(mel);
-      const position = (i / tickCount) * 100;
+    // Check if we're using mel scale or linear scale
+    const isLinear = freq_scale === 'linear';
 
-      ticks.push({
-        position,
-        freq,
-        label: formatFreq(freq)
-      });
+    if (isLinear) {
+      // Linear scale: evenly spaced in Hz
+      for (let i = 0; i <= tickCount; i++) {
+        const freq = freq_max - (i / tickCount) * (freq_max - freq_min);
+        const position = (i / tickCount) * 100;
+
+        ticks.push({
+          position,
+          freq,
+          label: formatFreq(freq)
+        });
+      }
+    } else {
+      // Mel scale: evenly spaced in Mel space
+      const melMin = hzToMel(freq_min);
+      const melMax = hzToMel(freq_max);
+
+      for (let i = 0; i <= tickCount; i++) {
+        const mel = melMax - (i / tickCount) * (melMax - melMin);
+        const freq = melToHz(mel);
+        const position = (i / tickCount) * 100;
+
+        ticks.push({
+          position,
+          freq,
+          label: formatFreq(freq)
+        });
+      }
     }
 
     return ticks;

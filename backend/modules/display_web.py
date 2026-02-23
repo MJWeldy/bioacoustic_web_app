@@ -20,6 +20,7 @@ from typing import Dict, List, Tuple, Optional, Union
 
 from modules import config as cfg
 from modules import utilities as u
+from scipy import signal
 
 def format_time_hms(seconds: float) -> str:
     """
@@ -39,6 +40,169 @@ def format_time_hms(seconds: float) -> str:
         return f"{hours}:{minutes:02d}:{secs:05.2f}"
     else:
         return f"{minutes}:{secs:05.2f}"
+
+
+def create_spectrogram_with_options(
+    audio_path: str,
+    clip_start: float,
+    clip_end: float,
+    color_mode: str = "viridis",
+    freq_scale: str = "mel",
+    n_mels: int = 256,
+    n_fft: int = 2048,
+    hop_length: int = 128,
+    window_size: Optional[int] = None,
+    fmin: Optional[float] = None,
+    fmax: Optional[float] = None,
+    bandpass_min: Optional[float] = None,
+    bandpass_max: Optional[float] = None
+) -> Tuple[str, Dict]:
+    """
+    Create spectrogram with customizable options and return base64 image plus metadata.
+
+    Args:
+        audio_path: Path to audio file
+        clip_start: Start time of clip in seconds
+        clip_end: End time of clip in seconds
+        color_mode: Color scheme for spectrogram (viridis, gray_r, plasma, inferno, etc.)
+        freq_scale: Frequency scale - "mel" or "linear"
+        n_mels: Number of mel bins (only used if freq_scale="mel")
+        n_fft: FFT window size
+        hop_length: Number of samples between successive frames
+        window_size: Window size in samples (if None, uses n_fft)
+        fmin: Minimum frequency (Hz) - if None, uses model default MIN_FREQ
+        fmax: Maximum frequency (Hz) - if None, uses model default MAX_FREQ
+        bandpass_min: Bandpass filter minimum frequency (Hz) - if None, no bandpass filtering
+        bandpass_max: Bandpass filter maximum frequency (Hz) - if None, no bandpass filtering
+
+    Returns:
+        Tuple of (base64 encoded PNG image, metadata dictionary)
+    """
+    # Add buffer of up to 1 second on each side
+    buffer_samples = 32000
+    buffer_s = buffer_samples / cfg.TARGET_SR
+
+    # Load the full audio file info
+    f = sf.SoundFile(audio_path)
+    file_duration = f.frames / f.samplerate
+
+    # Calculate buffered indices
+    buffered_start = max(0, clip_start - buffer_s)
+    buffered_end = min(file_duration, clip_end + buffer_s)
+
+    # Extract the buffered audio segment
+    y_buffered = u.load_audio(audio_path, (buffered_start, buffered_end, f.samplerate))
+
+    # Convert stereo to mono if necessary
+    if len(y_buffered.shape) > 1:
+        y_buffered = np.mean(y_buffered, axis=1)
+
+    # Apply bandpass filter if specified
+    if bandpass_min is not None and bandpass_max is not None:
+        # Design butterworth bandpass filter
+        nyquist = cfg.MODEL_SR / 2
+        low = bandpass_min / nyquist
+        high = bandpass_max / nyquist
+        # Ensure filter bounds are valid
+        low = max(0.001, min(low, 0.999))
+        high = max(low + 0.001, min(high, 0.999))
+
+        sos = signal.butter(5, [low, high], btype='band', output='sos')
+        y_buffered = signal.sosfilt(sos, y_buffered)
+
+    # Set frequency range defaults
+    if fmin is None:
+        fmin = cfg.MIN_FREQ
+    if fmax is None:
+        nyquist = cfg.MODEL_SR // 2
+        fmax = min(cfg.MAX_FREQ, nyquist)
+
+    # Set window size
+    if window_size is None:
+        window_size = n_fft
+
+    # Create figure with clean layout
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    # Generate spectrogram based on frequency scale
+    if freq_scale == "mel":
+        # Mel scale spectrogram
+        S = librosa.feature.melspectrogram(
+            y=y_buffered,
+            sr=cfg.MODEL_SR,
+            n_mels=n_mels,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=window_size,
+            fmin=fmin,
+            fmax=fmax
+        )
+        S_dB = librosa.power_to_db(S, ref=np.max)
+    else:
+        # Linear scale spectrogram (STFT)
+        D = librosa.stft(
+            y=y_buffered,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=window_size
+        )
+        S_dB = librosa.amplitude_to_db(np.abs(D), ref=np.max)
+
+        # For linear scale, we need to restrict frequency range
+        freqs = librosa.fft_frequencies(sr=cfg.MODEL_SR, n_fft=n_fft)
+        freq_slice = np.where((freqs >= fmin) & (freqs <= fmax))[0]
+        S_dB = S_dB[freq_slice, :]
+
+    # Display clean spectrogram as image
+    ax.imshow(S_dB, aspect='auto', origin='lower', cmap=color_mode, interpolation='nearest')
+
+    # Add clip boundaries with elegant white lines
+    total_duration = buffered_end - buffered_start
+    clip_start_rel = clip_start - buffered_start
+    clip_end_rel = clip_end - buffered_start
+
+    # Convert to pixel coordinates
+    x_start_px = (clip_start_rel / total_duration) * S_dB.shape[1]
+    x_end_px = (clip_end_rel / total_duration) * S_dB.shape[1]
+
+    ax.axvline(x=x_start_px, color='white', linestyle='-', linewidth=2.5, alpha=0.9)
+    ax.axvline(x=x_end_px, color='white', linestyle='-', linewidth=2.5, alpha=0.9)
+
+    # Remove all axes, ticks, labels, and margins
+    ax.set_position([0, 0, 1, 1])
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.axis('off')
+    fig.patch.set_alpha(0)
+
+    # Convert to base64
+    buffer = io.BytesIO()
+    plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight', pad_inches=0, transparent=True)
+    buffer.seek(0)
+    image_data = base64.b64encode(buffer.getvalue()).decode()
+    plt.close()
+
+    # Prepare metadata
+    metadata = {
+        "time_start": buffered_start,
+        "time_end": buffered_end,
+        "clip_start": clip_start,
+        "clip_end": clip_end,
+        "freq_min": fmin,
+        "freq_max": fmax,
+        "freq_scale": freq_scale,
+        "n_mels": n_mels if freq_scale == "mel" else None,
+        "n_fft": n_fft,
+        "hop_length": hop_length,
+        "window_size": window_size,
+        "bandpass_min": bandpass_min,
+        "bandpass_max": bandpass_max,
+        "db_min": float(np.min(S_dB)),
+        "db_max": float(np.max(S_dB))
+    }
+
+    return f"data:image/png;base64,{image_data}", metadata
+
 
 class WebAnnotationInterface:
     """

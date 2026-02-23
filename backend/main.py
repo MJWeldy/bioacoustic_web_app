@@ -98,10 +98,14 @@ SPECTROGRAM_CACHE_DIR = Path(tempfile.gettempdir()) / "bioacoustic_spectrogram_c
 MAX_SPECTROGRAM_CACHE_SIZE_GB = 1
 MAX_SPECTROGRAM_CACHE_SIZE_BYTES = MAX_SPECTROGRAM_CACHE_SIZE_GB * 1024 * 1024 * 1024
 
-def get_spectrogram_cache_key(file_path: str, start: float, end: float, color_mode: str) -> str:
-    """Generate unique cache key for a spectrogram including color mode"""
-    # Version 2: Clean spectrograms without matplotlib labels/axes
-    cache_string = f"v2_{file_path}_{start}_{end}_{color_mode}"
+def get_spectrogram_cache_key(file_path: str, start: float, end: float, color_mode: str,
+                              freq_scale: str = "mel", n_mels: int = 256, n_fft: int = 2048,
+                              hop_length: int = 128, window_size: Optional[int] = None,
+                              fmin: Optional[float] = None, fmax: Optional[float] = None,
+                              bandpass_min: Optional[float] = None, bandpass_max: Optional[float] = None) -> str:
+    """Generate unique cache key for a spectrogram including all parameters"""
+    # Version 3: Spectrograms with customizable parameters
+    cache_string = f"v3_{file_path}_{start}_{end}_{color_mode}_{freq_scale}_{n_mels}_{n_fft}_{hop_length}_{window_size}_{fmin}_{fmax}_{bandpass_min}_{bandpass_max}"
     return hashlib.md5(cache_string.encode()).hexdigest() + ".png"
 
 def get_spectrogram_cache_size() -> int:
@@ -168,7 +172,16 @@ class SpectrogramRequest(BaseModel):
     file_path: str
     clip_start: float
     clip_end: float
-    color_mode: str = "viridis"  # viridis, gray_r
+    color_mode: str = "viridis"  # viridis, gray_r, plasma, inferno, etc.
+    freq_scale: str = "mel"  # mel or linear
+    n_mels: int = 256  # number of mel bins (only used if freq_scale="mel")
+    n_fft: int = 2048  # FFT window size
+    hop_length: int = 128  # samples between successive frames
+    window_size: Optional[int] = None  # window size in samples (if None, uses n_fft)
+    fmin: Optional[float] = None  # minimum frequency (Hz)
+    fmax: Optional[float] = None  # maximum frequency (Hz)
+    bandpass_min: Optional[float] = None  # bandpass filter min frequency (Hz)
+    bandpass_max: Optional[float] = None  # bandpass filter max frequency (Hz)
 
 class TrainingParams(BaseModel):
     model_config = {'protected_namespaces': ()}
@@ -1649,12 +1662,21 @@ def generate_spectrogram(request: SpectrogramRequest):
         import io
         import base64
 
-        # Generate cache key (includes color mode for proper invalidation)
+        # Generate cache key (includes all parameters for proper cache invalidation)
         cache_key = get_spectrogram_cache_key(
             request.file_path,
             request.clip_start,
             request.clip_end,
-            request.color_mode
+            request.color_mode,
+            request.freq_scale,
+            request.n_mels,
+            request.n_fft,
+            request.hop_length,
+            request.window_size,
+            request.fmin,
+            request.fmax,
+            request.bandpass_min,
+            request.bandpass_max
         )
 
         # Create cache directory if it doesn't exist
@@ -1679,8 +1701,11 @@ def generate_spectrogram(request: SpectrogramRequest):
             f = sf.SoundFile(request.file_path)
             file_duration = f.frames / f.samplerate
             buffered_end = min(file_duration, request.clip_end + buffer_s)
+
+            # Set frequency range from request or defaults
+            fmin = request.fmin if request.fmin is not None else cfg.MIN_FREQ
             nyquist = cfg.MODEL_SR // 2
-            fmax = min(cfg.MAX_FREQ, nyquist)
+            fmax = request.fmax if request.fmax is not None else min(cfg.MAX_FREQ, nyquist)
 
             return {
                 "spectrogram": f"data:image/png;base64,{image_data}",
@@ -1689,78 +1714,54 @@ def generate_spectrogram(request: SpectrogramRequest):
                     "time_end": float(buffered_end),
                     "clip_start": float(request.clip_start),
                     "clip_end": float(request.clip_end),
-                    "freq_min": 0,
-                    "freq_max": int(fmax),
+                    "freq_min": float(fmin),
+                    "freq_max": float(fmax),
+                    "freq_scale": request.freq_scale,
+                    "n_mels": request.n_mels if request.freq_scale == "mel" else None,
+                    "n_fft": request.n_fft,
+                    "hop_length": request.hop_length,
+                    "window_size": request.window_size,
+                    "bandpass_min": request.bandpass_min,
+                    "bandpass_max": request.bandpass_max,
                     "db_min": -80.0,  # Approximate for cached spectrograms
                     "db_max": 0.0
                 }
             }
 
-        # Cache MISS - Generate spectrogram
-        print(f"Spectrogram cache MISS: Generating for {request.file_path} ({request.clip_start}-{request.clip_end}s, {request.color_mode})")
+        # Cache MISS - Generate spectrogram using new flexible function
+        print(f"Spectrogram cache MISS: Generating for {request.file_path} ({request.clip_start}-{request.clip_end}s)")
+        print(f"  Parameters: scale={request.freq_scale}, n_mels={request.n_mels}, n_fft={request.n_fft}, hop={request.hop_length}")
+        if request.bandpass_min and request.bandpass_max:
+            print(f"  Bandpass filter: {request.bandpass_min}-{request.bandpass_max} Hz")
 
-        # Load audio with buffer
-        buffer_s = 1.0  # 1 second buffer
-        buffered_start = max(0, request.clip_start - buffer_s)
+        # Generate spectrogram with all custom parameters
+        from modules.display_web import create_spectrogram_with_options
 
-        import soundfile as sf
-        f = sf.SoundFile(request.file_path)
-        file_duration = f.frames / f.samplerate
-        buffered_end = min(file_duration, request.clip_end + buffer_s)
-
-        # Load buffered audio
-        audio = u.load_audio(request.file_path, (buffered_start, buffered_end, f.samplerate))
-
-        # Convert stereo to mono if necessary
-        if len(audio.shape) > 1:
-            audio = np.mean(audio, axis=1)
-
-        # Create spectrogram
-        fig, ax = plt.subplots(figsize=(14, 7))
-        nyquist = cfg.MODEL_SR // 2
-        fmax = min(cfg.MAX_FREQ, nyquist)
-
-        S = librosa.feature.melspectrogram(
-            y=audio,
-            sr=cfg.MODEL_SR,
-            n_mels=256,
-            fmax=fmax,
-            hop_length=128
+        spectrogram_base64, metadata = create_spectrogram_with_options(
+            audio_path=request.file_path,
+            clip_start=request.clip_start,
+            clip_end=request.clip_end,
+            color_mode=request.color_mode,
+            freq_scale=request.freq_scale,
+            n_mels=request.n_mels,
+            n_fft=request.n_fft,
+            hop_length=request.hop_length,
+            window_size=request.window_size,
+            fmin=request.fmin,
+            fmax=request.fmax,
+            bandpass_min=request.bandpass_min,
+            bandpass_max=request.bandpass_max
         )
-        S_dB = librosa.power_to_db(S, ref=np.max)
 
-        # Validate color mode and use it directly
-        valid_cmaps = ['viridis', 'plasma', 'inferno', 'gray_r', 'magma', 'cividis']
-        cmap = request.color_mode if request.color_mode in valid_cmaps else 'viridis'
-        print(f"DEBUG: Using colormap: {cmap}")
+        # Extract just the base64 data (without the data:image/png;base64, prefix)
+        if spectrogram_base64.startswith("data:image/png;base64,"):
+            image_data_only = spectrogram_base64.split(",", 1)[1]
+        else:
+            image_data_only = spectrogram_base64
 
-        # Display clean spectrogram as image (no axes, labels, or ticks)
-        ax.imshow(S_dB, aspect='auto', origin='lower', cmap=cmap, interpolation='nearest')
-
-        # Add clip boundaries with elegant white lines
-        # Calculate positions based on spectrogram array dimensions
-        total_duration = buffered_end - buffered_start
-        clip_start_rel = request.clip_start - buffered_start
-        clip_end_rel = request.clip_end - buffered_start
-
-        # Convert to pixel coordinates (0 to S.shape[1])
-        x_start_px = (clip_start_rel / total_duration) * S.shape[1]
-        x_end_px = (clip_end_rel / total_duration) * S.shape[1]
-
-        ax.axvline(x=x_start_px, color='white', linestyle='-', linewidth=2.5, alpha=0.9)
-        ax.axvline(x=x_end_px, color='white', linestyle='-', linewidth=2.5, alpha=0.9)
-
-        # Remove all axes, ticks, labels, and margins
-        ax.set_position([0, 0, 1, 1])
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.axis('off')
-        fig.patch.set_alpha(0)
-
-        # Save to buffer and cache file with no padding/margins
-        buffer = io.BytesIO()
-        plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight', pad_inches=0, transparent=True)
-        buffer.seek(0)
+        # Convert base64 back to bytes for caching
+        image_bytes = base64.b64decode(image_data_only)
+        buffer = io.BytesIO(image_bytes)
 
         # Save to cache
         try:
@@ -1773,24 +1774,10 @@ def generate_spectrogram(request: SpectrogramRequest):
         except Exception as e:
             print(f"Spectrogram cache save error (non-fatal): {e}")
 
-        # Convert to base64 for response
-        buffer.seek(0)
-        image_data = base64.b64encode(buffer.getvalue()).decode()
-        plt.close()
-
         # Return spectrogram with metadata for frontend scales
         return {
-            "spectrogram": f"data:image/png;base64,{image_data}",
-            "metadata": {
-                "time_start": float(buffered_start),
-                "time_end": float(buffered_end),
-                "clip_start": float(request.clip_start),
-                "clip_end": float(request.clip_end),
-                "freq_min": 0,
-                "freq_max": int(fmax),
-                "db_min": float(np.min(S_dB)),
-                "db_max": float(np.max(S_dB))
-            }
+            "spectrogram": spectrogram_base64,
+            "metadata": metadata
         }
 
     except Exception as e:
