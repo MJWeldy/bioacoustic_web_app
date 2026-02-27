@@ -40,6 +40,7 @@ import {
   ExpandMore as ExpandMoreIcon,
   Info as InfoIcon,
   BarChart as StatsIcon,
+  BarChart,
   Search as SearchIcon,
   Clear as ClearIcon,
   Refresh as RefreshIcon,
@@ -65,6 +66,17 @@ const DatabaseViewer = ({ isActive = true }) => {
   const [files, setFiles] = useState([]);
   const [selectedTable, setSelectedTable] = useState('clips');
   const [expandedSection, setExpandedSection] = useState('data'); // 'data', 'stats', 'schema'
+
+  // Multiclass score view state
+  const [showMulticlassView, setShowMulticlassView] = useState(false);
+  const [multiclassData, setMulticlassData] = useState([]);
+  const [multiclassLoading, setMulticlassLoading] = useState(false);
+  const [selectedClasses, setSelectedClasses] = useState([]);
+  const [multiclassPage, setMulticlassPage] = useState(0);
+  const [multiclassTotalRows, setMulticlassTotalRows] = useState(0);
+  const [scoreFilterMin, setScoreFilterMin] = useState('');
+  const [scoreFilterMax, setScoreFilterMax] = useState('');
+  const [scoreFilterClass, setScoreFilterClass] = useState('');
 
   const pageSizeOptions = [25, 50, 100, 200];
 
@@ -196,6 +208,41 @@ const DatabaseViewer = ({ isActive = true }) => {
     }
   };
 
+  const loadMulticlassScores = async (page = 0) => {
+    if (!databaseInfo || selectedClasses.length === 0) {
+      toast.error('Please select at least one class');
+      return;
+    }
+
+    setMulticlassLoading(true);
+    try {
+      const offset = page * pageSize;
+      const classIndices = selectedClasses.join(',');
+
+      const params = {
+        class_indices: classIndices,
+        limit: pageSize,
+        offset: offset,
+        ...(scoreFilterMin && { min_score: parseFloat(scoreFilterMin) }),
+        ...(scoreFilterMax && { max_score: parseFloat(scoreFilterMax) }),
+        ...(scoreFilterClass && { filter_class_index: parseInt(scoreFilterClass) })
+      };
+
+      const response = await axios.get('/api/database/multiclass-scores', { params });
+
+      if (response.data.status === 'success') {
+        setMulticlassData(response.data.data);
+        setMulticlassTotalRows(response.data.total_rows);
+        setMulticlassPage(page);
+      }
+    } catch (error) {
+      toast.error('Failed to load multiclass scores');
+      console.error('Multiclass scores error:', error);
+    } finally {
+      setMulticlassLoading(false);
+    }
+  };
+
   // --- Event Handlers ---
   const handleFilter = async () => {
     if (filterColumn && filterValue) {
@@ -217,6 +264,21 @@ const DatabaseViewer = ({ isActive = true }) => {
   const handlePageSizeChange = (event) => {
     setPageSize(event.target.value);
     loadData(0); // Reset to first page
+  };
+
+  const handleMulticlassPageChange = (event, newPage) => {
+    loadMulticlassScores(newPage - 1);
+  };
+
+  const handleApplyScoreFilter = () => {
+    loadMulticlassScores(0);
+  };
+
+  const handleClearScoreFilter = () => {
+    setScoreFilterMin('');
+    setScoreFilterMax('');
+    setScoreFilterClass('');
+    loadMulticlassScores(0);
   };
 
   // --- Effects ---
@@ -475,7 +537,175 @@ const DatabaseViewer = ({ isActive = true }) => {
         </CardContent>
       </Card>
 
-      {/* 3. Advanced Analysis (Schema & Stats) */}
+      {/* 3. Multiclass Score View */}
+      <Card elevation={0} sx={{ border: '1px solid #e0e0e0', mb: 2 }}>
+        <CardHeader
+          title={
+            <Stack direction="row" alignItems="center" spacing={2}>
+              <BarChart />
+              <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                Multiclass Score Viewer
+              </Typography>
+            </Stack>
+          }
+          subheader="View and filter scores across multiple target classes"
+          action={
+            <Button
+              variant={showMulticlassView ? "outlined" : "contained"}
+              onClick={() => setShowMulticlassView(!showMulticlassView)}
+            >
+              {showMulticlassView ? "Hide" : "Show"}
+            </Button>
+          }
+        />
+        <Collapse in={showMulticlassView}>
+          <CardContent>
+            {/* Class Selection & Filters */}
+            <Grid container spacing={2} sx={{ mb: 2 }}>
+              <Grid item xs={12} md={4}>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Select Classes</InputLabel>
+                  <Select
+                    multiple
+                    value={selectedClasses}
+                    label="Select Classes"
+                    onChange={(e) => setSelectedClasses(typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value)}
+                    renderValue={(selected) => selected.length + ' selected'}
+                  >
+                    {databaseInfo?.class_map && Object.entries(databaseInfo.class_map).map(([name, idx]) => (
+                      <MenuItem key={idx} value={idx}>{name}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid item xs={12} md={2}>
+                <TextField
+                  fullWidth
+                  size="small"
+                  type="number"
+                  label="Min Score"
+                  value={scoreFilterMin}
+                  onChange={(e) => setScoreFilterMin(e.target.value)}
+                  inputProps={{ step: 0.01, min: 0, max: 1 }}
+                />
+              </Grid>
+              <Grid item xs={12} md={2}>
+                <TextField
+                  fullWidth
+                  size="small"
+                  type="number"
+                  label="Max Score"
+                  value={scoreFilterMax}
+                  onChange={(e) => setScoreFilterMax(e.target.value)}
+                  inputProps={{ step: 0.01, min: 0, max: 1 }}
+                />
+              </Grid>
+              <Grid item xs={12} md={2}>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Filter By Class</InputLabel>
+                  <Select
+                    value={scoreFilterClass}
+                    label="Filter By Class"
+                    onChange={(e) => setScoreFilterClass(e.target.value)}
+                  >
+                    <MenuItem value=""><em>Any Class</em></MenuItem>
+                    {selectedClasses.map(classIdx => {
+                      const className = databaseInfo?.class_map ? Object.keys(databaseInfo.class_map).find(k => databaseInfo.class_map[k] === classIdx) : `Class ${classIdx}`;
+                      return <MenuItem key={classIdx} value={classIdx}>{className}</MenuItem>;
+                    })}
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid item xs={12} md={2}>
+                <Stack direction="row" spacing={1}>
+                  <Button
+                    variant="contained"
+                    fullWidth
+                    onClick={handleApplyScoreFilter}
+                    disabled={selectedClasses.length === 0 || multiclassLoading}
+                    size="small"
+                  >
+                    Load
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    onClick={handleClearScoreFilter}
+                    disabled={multiclassLoading}
+                    size="small"
+                  >
+                    Clear
+                  </Button>
+                </Stack>
+              </Grid>
+            </Grid>
+
+            {/* Data Table */}
+            {multiclassLoading && <LinearProgress sx={{ mb: 1 }} />}
+            <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 600 }}>
+              <Table stickyHeader size="small">
+                <TableHead>
+                  <TableRow>
+                    {multiclassData.length > 0 && Object.keys(multiclassData[0]).map((col) => (
+                      <TableCell key={col} sx={{ bgcolor: '#f5f5f5', fontWeight: 'bold', whiteSpace: 'nowrap' }}>
+                        {col}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {multiclassData.length > 0 ? (
+                    multiclassData.map((row, idx) => (
+                      <TableRow key={idx} hover>
+                        {Object.entries(row).map(([key, val], cellIdx) => (
+                          <TableCell key={cellIdx} sx={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {key.startsWith('score_') ? (
+                              <Chip
+                                label={typeof val === 'number' ? val.toFixed(3) : val}
+                                size="small"
+                                color={val >= 0.8 ? 'success' : val >= 0.5 ? 'warning' : 'default'}
+                                variant="outlined"
+                              />
+                            ) : (
+                              val !== null && val !== undefined ? val.toString() : <Typography variant="caption" color="text.disabled">null</Typography>
+                            )}
+                          </TableCell>
+                        ))}
+                      </TableRow>
+                    ))
+                  ) : (
+                    <TableRow>
+                      <TableCell colSpan={100} align="center">
+                        <Typography variant="body2" color="text.secondary" sx={{ py: 4 }}>
+                          {selectedClasses.length === 0 ? 'Select classes and click Load to view scores' : 'No data available'}
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+
+            {/* Pagination */}
+            {multiclassData.length > 0 && (
+              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mt: 2 }}>
+                <Typography variant="body2" color="text.secondary">
+                  Total: {multiclassTotalRows} clips
+                </Typography>
+                <Pagination
+                  count={Math.ceil(multiclassTotalRows / pageSize)}
+                  page={multiclassPage + 1}
+                  onChange={handleMulticlassPageChange}
+                  color="primary"
+                  showFirstButton
+                  showLastButton
+                />
+              </Stack>
+            )}
+          </CardContent>
+        </Collapse>
+      </Card>
+
+      {/* 4. Advanced Analysis (Schema & Stats) */}
       <Accordion elevation={0} sx={{ border: '1px solid #e0e0e0', mb: 2, '&:before': { display: 'none' } }}>
         <AccordionSummary expandIcon={<ExpandMoreIcon />}>
             <Typography variant="h6" sx={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 1 }}>

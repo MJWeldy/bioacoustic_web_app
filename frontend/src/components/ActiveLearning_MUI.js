@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { toast } from 'react-toastify';
-import SpectrogramViewer, { formatTime as formatTimeDetailed, formatFreq } from './SpectrogramViewer';
+import SpectrogramViewer, { formatTime as formatTimeDetailed, formatFreq, renderSpectrogramWithAxes } from './SpectrogramViewer';
 import SpectrogramOptions from './SpectrogramOptions';
 import {
   Box,
@@ -599,6 +599,14 @@ const ActiveLearning = ({ isActive = true }) => {
     }
   };
 
+  // Helper function to reset annotation state - used when filters change
+  const resetAnnotationState = () => {
+    setIsAnnotating(false);
+    setCurrentClip(null);
+    setCurrentClipIndex(0);
+    setClips([]);
+  };
+
   const changeReviewMode = async (newReviewMode) => {
     try {
       const response = await axios.post('/api/active-learning/set-review-mode', {
@@ -607,10 +615,7 @@ const ActiveLearning = ({ isActive = true }) => {
 
       if (response.data.status === 'success') {
         setReviewMode(newReviewMode);
-        setIsAnnotating(false); // Reset annotation state when mode changes
-        setCurrentClip(null); // Clear current clip
-        setCurrentClipIndex(0); // Reset index
-        setClips([]); // Clear clips array
+        resetAnnotationState();
         toast.success(response.data.message + ' - Click "Start Annotation" to begin.');
       }
     } catch (error) {
@@ -635,10 +640,7 @@ const ActiveLearning = ({ isActive = true }) => {
 
       if (response.data.status === 'success') {
         setCurrentClassIndex(classIndex);
-        setIsAnnotating(false); // Reset annotation state when class changes
-        setCurrentClip(null); // Clear current clip
-        setCurrentClipIndex(0); // Reset index
-        setClips([]); // Clear clips array
+        resetAnnotationState();
         await loadLabelStatistics();
         toast.success(response.data.message + ' - Click "Start Annotation" to begin.');
       }
@@ -695,12 +697,26 @@ const ActiveLearning = ({ isActive = true }) => {
     }
   };
 
-  const saveSpectrogram = () => {
+  const saveSpectrogram = async () => {
     if (!spectrogramUrl) return;
-    const link = document.createElement('a');
-    link.href = spectrogramUrl;
-    link.download = `spectrogram_${currentClip?.clip_id || 'clip'}.png`;
-    link.click();
+
+    try {
+      // Render spectrogram with axes
+      const blob = await renderSpectrogramWithAxes(spectrogramUrl, spectrogramMetadata);
+
+      // Create download link
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `spectrogram_${currentClip?.clip_id || 'clip'}.png`;
+      link.click();
+
+      // Clean up
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to save spectrogram:', error);
+      toast.error('Failed to save spectrogram image');
+    }
   };
 
   const saveAudio = () => {
@@ -720,13 +736,23 @@ const ActiveLearning = ({ isActive = true }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spectrogramOptions]);
 
-  // Removed automatic loading on scoreRange change - user must click "Start Annotation"
-  // useEffect(() => {
-  //   if (isDatasetLoaded && isAnnotating) {
-  //     getClips();
-  //   }
-  //   // eslint-disable-next-line react-hooks/exhaustive-deps
-  // }, [scoreRange]);
+  // Reset annotation state when score range changes - user must click "Start Annotation" to apply
+  useEffect(() => {
+    if (isAnnotating) {
+      resetAnnotationState();
+      toast.info('Score range changed. Click "Start Annotation" to apply new filters.');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scoreRange]);
+
+  // Reset annotation state when annotation status filter changes - user must click "Start Annotation" to apply
+  useEffect(() => {
+    if (isAnnotating) {
+      resetAnnotationState();
+      toast.info('Annotation filter changed. Click "Start Annotation" to apply new filters.');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [annotationStatusFilter]);
 
   // Get current label status
   const getCurrentLabelStatus = () => {

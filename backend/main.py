@@ -926,8 +926,131 @@ async def get_table_info(table: str = "clips"):
         }
         
         return {"status": "success", "info": info}
-        
+
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/database/multiclass-scores")
+async def get_multiclass_scores(
+    class_indices: str = None,  # Comma-separated class indices, e.g., "0,1,2"
+    limit: int = 100,
+    offset: int = 0,
+    min_score: float = None,  # Filter clips where ANY selected class score >= min_score
+    max_score: float = None,  # Filter clips where ANY selected class score <= max_score
+    filter_class_index: int = None,  # Apply score filter to a specific class
+):
+    """
+    Get clips with scores for selected classes.
+    Returns a table where clips are rows and selected classes are columns.
+    """
+    if app_state["audio_db"] is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded")
+
+    try:
+        audio_db = app_state["audio_db"]
+
+        # Parse class indices
+        if class_indices:
+            selected_classes = [int(idx.strip()) for idx in class_indices.split(",")]
+        else:
+            # Default to all classes
+            selected_classes = list(range(audio_db.num_classes))
+
+        # Validate class indices
+        for idx in selected_classes:
+            if idx < 0 or idx >= audio_db.num_classes:
+                raise HTTPException(status_code=400, detail=f"Invalid class index: {idx}")
+
+        # Start with clips dataframe joined with files for context
+        df = audio_db.get_clips_with_files()
+
+        # Extract scores for each selected class
+        class_map = app_state.get("class_map", {})
+        class_names = list(class_map.keys()) if class_map else [f"Class_{i}" for i in range(audio_db.num_classes)]
+
+        for class_idx in selected_classes:
+            class_name = class_names[class_idx] if class_idx < len(class_names) else f"Class_{class_idx}"
+            score_col_name = f"score_{class_name}"
+
+            # Extract score for this class from confidence_predictions array
+            if "confidence_predictions" in df.columns:
+                df = df.with_columns(
+                    pl.col("confidence_predictions").list.get(class_idx).fill_null(0.0).alias(score_col_name)
+                )
+            elif "predictions" in df.columns:
+                df = df.with_columns(
+                    pl.col("predictions").list.get(class_idx).fill_null(0.0).alias(score_col_name)
+                )
+
+        # Apply score filtering
+        if min_score is not None or max_score is not None:
+            if filter_class_index is not None and filter_class_index in selected_classes:
+                # Filter by specific class score
+                class_name = class_names[filter_class_index] if filter_class_index < len(class_names) else f"Class_{filter_class_index}"
+                score_col_name = f"score_{class_name}"
+
+                if min_score is not None:
+                    df = df.filter(pl.col(score_col_name) >= min_score)
+                if max_score is not None:
+                    df = df.filter(pl.col(score_col_name) <= max_score)
+            else:
+                # Filter by ANY selected class score
+                score_cols = [f"score_{class_names[idx] if idx < len(class_names) else f'Class_{idx}'}" for idx in selected_classes]
+
+                if min_score is not None:
+                    # At least one selected class must have score >= min_score
+                    filter_expr = pl.lit(False)
+                    for col in score_cols:
+                        filter_expr = filter_expr | (pl.col(col) >= min_score)
+                    df = df.filter(filter_expr)
+
+                if max_score is not None:
+                    # At least one selected class must have score <= max_score
+                    filter_expr = pl.lit(False)
+                    for col in score_cols:
+                        filter_expr = filter_expr | (pl.col(col) <= max_score)
+                    df = df.filter(filter_expr)
+
+        # Get total count before pagination
+        total_rows = len(df)
+
+        # Extract filename from file_path for easier viewing
+        if "file_path" in df.columns:
+            df = df.with_columns(
+                pl.col("file_path").str.split("/").list.last().alias("filename")
+            )
+
+        # Select relevant columns for display
+        display_columns = ["clip_id", "filename", "clip_start", "clip_end"]
+        # Add score columns
+        for class_idx in selected_classes:
+            class_name = class_names[class_idx] if class_idx < len(class_names) else f"Class_{class_idx}"
+            display_columns.append(f"score_{class_name}")
+
+        # Only keep columns that exist
+        display_columns = [col for col in display_columns if col in df.columns]
+        df = df.select(display_columns)
+
+        # Apply pagination
+        if offset > 0:
+            df = df.slice(offset, limit)
+        else:
+            df = df.head(limit)
+
+        # Convert to dict format
+        data = df.to_dicts()
+
+        return {
+            "status": "success",
+            "data": data,
+            "total_rows": total_rows,
+            "selected_classes": selected_classes,
+            "class_names": [class_names[idx] if idx < len(class_names) else f"Class_{idx}" for idx in selected_classes]
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 # Active Learning endpoints
@@ -1477,6 +1600,71 @@ async def get_clip_labels(clip_id: str):
         print(f"ERROR in get_clip_labels: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/validation/clip-labels")
+async def get_validation_clip_labels(filename: str, start_time: float, end_time: float, current_species: str = None):
+    """Get all confirmed species for a clip from validation annotations"""
+    if app_state["validation_db"] is None:
+        # No validation database loaded, return empty
+        return {
+            "status": "success",
+            "class_labels": []
+        }
+
+    try:
+        print(f"DEBUG: get_validation_clip_labels called with filename={filename}, start_time={start_time}, end_time={end_time}, current_species={current_species}")
+
+        validation_db = app_state["validation_db"]
+
+        # Find all validation annotations for this clip (same file and time range)
+        # Use tolerance for floating point comparison
+        tolerance = 0.1  # 100ms tolerance
+
+        matching_annotations = validation_db.validation_annotations_df.filter(
+            (pl.col("filename") == filename) &
+            (pl.col("start_time") >= start_time - tolerance) &
+            (pl.col("start_time") <= start_time + tolerance) &
+            (pl.col("end_time") >= end_time - tolerance) &
+            (pl.col("end_time") <= end_time + tolerance) &
+            (pl.col("validation_state") == "confirmed")  # Only show confirmed
+        )
+
+        print(f"DEBUG: Found {len(matching_annotations)} confirmed annotations for this clip")
+
+        class_labels = []
+
+        if len(matching_annotations) > 0:
+            # Get unique species that have been confirmed
+            for row in matching_annotations.iter_rows(named=True):
+                species_name = row["species_name"]
+
+                # Skip the current species being validated
+                if current_species and species_name == current_species:
+                    continue
+
+                # Check if we already added this species
+                if not any(label["class_name"] == species_name for label in class_labels):
+                    class_labels.append({
+                        "class_name": species_name,
+                        "label_text": "Present"
+                    })
+
+        print(f"DEBUG: Returning {len(class_labels)} confirmed labels: {[l['class_name'] for l in class_labels]}")
+
+        return {
+            "status": "success",
+            "class_labels": class_labels
+        }
+
+    except Exception as e:
+        print(f"ERROR in get_validation_clip_labels: {e}")
+        import traceback
+        traceback.print_exc()
+        # Don't raise exception, just return empty - this is optional info
+        return {
+            "status": "success",
+            "class_labels": []
+        }
+
 @app.post("/api/active-learning/save-database")
 async def save_database():
     """Save the current database"""
@@ -1511,6 +1699,63 @@ async def check_export_folder(export_path: str):
         }
 
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/validation/clip-predictions")
+async def get_clip_predictions(filename: str, start_time: float, end_time: float):
+    """Get all species predictions for a specific clip"""
+    if app_state["validation_db"] is None:
+        raise HTTPException(status_code=400, detail="No validation database loaded")
+
+    try:
+        validation_db = app_state["validation_db"]
+
+        # Find all predictions for this clip (same file and time range)
+        # Use tolerance for floating point comparison
+        tolerance = 0.1  # 100ms tolerance
+
+        matching_predictions = validation_db.predictions_df.filter(
+            (pl.col("filename") == filename) &
+            (pl.col("start_time") >= start_time - tolerance) &
+            (pl.col("start_time") <= start_time + tolerance) &
+            (pl.col("end_time") >= end_time - tolerance) &
+            (pl.col("end_time") <= end_time + tolerance)
+        )
+
+        # Get all validation annotations for this clip
+        matching_annotations = validation_db.validation_annotations_df.filter(
+            (pl.col("filename") == filename) &
+            (pl.col("start_time") >= start_time - tolerance) &
+            (pl.col("start_time") <= start_time + tolerance) &
+            (pl.col("end_time") >= end_time - tolerance) &
+            (pl.col("end_time") <= end_time + tolerance)
+        )
+
+        # Create a map of species -> validation status
+        validation_status_map = {}
+        if len(matching_annotations) > 0:
+            for row in matching_annotations.iter_rows(named=True):
+                species_name = row["species_name"]
+                validation_state = row["validation_state"]
+                validation_status_map[species_name] = validation_state
+
+        # Convert predictions to list of dicts and add validation status
+        predictions = matching_predictions.sort("confidence", descending=True).to_dicts()
+
+        # Add validation_status field to each prediction
+        for pred in predictions:
+            species_name = pred.get("species_name")
+            pred["validation_status"] = validation_status_map.get(species_name, None)
+
+        return {
+            "status": "success",
+            "predictions": predictions
+        }
+
+    except Exception as e:
+        print(f"ERROR in get_clip_predictions: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/active-learning/export-clips")
@@ -3750,6 +3995,83 @@ async def submit_validation_annotation(request: Request):
         error_details = traceback.format_exc()
         print(f"ERROR in submit_annotation: {e}")
         print(f"ERROR traceback:\n{error_details}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/validation/delete-annotation")
+async def delete_validation_annotation(prediction_id: str, species_name: str):
+    """Delete a validation annotation"""
+    if app_state["validation_db"] is None:
+        raise HTTPException(status_code=400, detail="No validation data loaded")
+
+    try:
+        validation_db = app_state["validation_db"]
+
+        with validation_db._save_lock:
+            # Find the annotation to delete
+            annotation_to_delete = validation_db.validation_annotations_df.filter(
+                (pl.col("prediction_id") == prediction_id) &
+                (pl.col("species_name") == species_name)
+            )
+
+            if len(annotation_to_delete) == 0:
+                raise HTTPException(status_code=404, detail="Annotation not found")
+
+            # Get the annotation details before deletion
+            annotation_row = annotation_to_delete.row(0, named=True)
+            validation_state = annotation_row["validation_state"]
+            strata_id = annotation_row["strata_id"]
+
+            # Delete the annotation
+            validation_db.validation_annotations_df = validation_db.validation_annotations_df.filter(
+                ~((pl.col("prediction_id") == prediction_id) & (pl.col("species_name") == species_name))
+            )
+
+            # Update progress tracking
+            if strata_id and species_name:
+                current_progress = validation_db.validation_progress_df.filter(
+                    (pl.col("strata_id") == strata_id) &
+                    (pl.col("species_name") == species_name)
+                )
+
+                if len(current_progress) > 0:
+                    progress_row = current_progress.row(0, named=True)
+
+                    # Decrement counts based on the deleted annotation's state
+                    updates = {}
+                    if validation_state == "confirmed":
+                        updates["confirmed_clips"] = max(0, int(progress_row["confirmed_clips"]) - 1)
+                    elif validation_state == "rejected":
+                        updates["rejected_clips"] = max(0, int(progress_row["rejected_clips"]) - 1)
+                    elif validation_state == "uncertain":
+                        updates["uncertain_clips"] = max(0, int(progress_row["uncertain_clips"]) - 1)
+                    elif validation_state == "skipped":
+                        updates["skipped_clips"] = max(0, int(progress_row["skipped_clips"]) - 1)
+
+                    updates["validated_clips"] = max(0, int(progress_row["validated_clips"]) - 1)
+                    updates["last_updated"] = datetime.now()
+
+                    # Update the progress row
+                    validation_db.validation_progress_df = validation_db.validation_progress_df.with_columns([
+                        pl.when((pl.col("strata_id") == strata_id) & (pl.col("species_name") == species_name))
+                        .then(pl.lit(updates[col]))
+                        .otherwise(pl.col(col))
+                        .alias(col)
+                        for col in updates.keys()
+                    ])
+
+            # Queue save
+            validation_db.queue_save()
+
+        return {
+            "status": "success",
+            "message": "Annotation deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/validation/summary")

@@ -379,11 +379,18 @@ class ValidationDB:
             if format_type == 'auto':
                 format_type = self._detect_format(df)
 
+            print(f"DEBUG: Detected format: {format_type}")
+
             # Convert to long format if needed
             if format_type == 'wide':
+                print("DEBUG: Converting from wide to long format")
                 df_long = self._convert_wide_to_long(df)
             else:
+                print("DEBUG: Data already in long format, no conversion needed")
                 df_long = df
+
+            print(f"DEBUG: After format conversion - Columns: {df_long.columns}")
+            print(f"DEBUG: After format conversion - Row count: {len(df_long)}")
 
             # Validate required columns
             required_cols = ['filename', 'start_time', 'end_time', 'species_name', 'confidence']
@@ -395,6 +402,28 @@ class ValidationDB:
             if 'strata' not in df_long.columns:
                 print("Warning: No 'strata' column found. Adding default strata 'all_data'")
                 df_long = df_long.with_columns(pl.lit('all_data').alias('strata'))
+            else:
+                # Show sample of strata values for debugging
+                unique_strata = df_long['strata'].unique().to_list()
+                print(f"DEBUG: Found strata column with {len(unique_strata)} unique values: {unique_strata[:10]}")
+
+                # Check for null or empty values
+                null_count = df_long.filter(pl.col('strata').is_null()).height
+                empty_count = df_long.filter(pl.col('strata') == '').height
+                if null_count > 0:
+                    print(f"WARNING: Found {null_count} rows with null strata values")
+                if empty_count > 0:
+                    print(f"WARNING: Found {empty_count} rows with empty strata values")
+
+                # Replace null/empty strata with 'all_data'
+                if null_count > 0 or empty_count > 0:
+                    print("DEBUG: Replacing null/empty strata values with 'all_data'")
+                    df_long = df_long.with_columns(
+                        pl.when((pl.col('strata').is_null()) | (pl.col('strata') == ''))
+                        .then(pl.lit('all_data'))
+                        .otherwise(pl.col('strata'))
+                        .alias('strata')
+                    )
 
             # Generate prediction IDs and add metadata
             prediction_ids = [str(uuid.uuid4()) for _ in range(len(df_long))]
@@ -581,6 +610,12 @@ class ValidationDB:
     def _convert_wide_to_long(self, df: pl.DataFrame) -> pl.DataFrame:
         """Convert wide format (species as columns) to long format."""
         # Identify metadata columns and species columns
+        # Check if strata column exists, if not add it with default values
+        has_strata = 'strata' in df.columns
+        if not has_strata:
+            print("DEBUG: Wide format CSV missing 'strata' column, adding default 'all_data'")
+            df = df.with_columns(pl.lit('all_data').alias('strata'))
+
         metadata_cols = ['filename', 'start_time', 'end_time', 'strata']
         species_cols = [col for col in df.columns if col not in metadata_cols]
 
@@ -596,6 +631,7 @@ class ValidationDB:
                 continue
 
         print(f"DEBUG: Converting {len(valid_species_cols)} species columns to long format")
+        print(f"DEBUG: Strata column present: {has_strata}")
 
         # Melt the dataframe
         df_long = df.melt(
@@ -616,15 +652,26 @@ class ValidationDB:
 
         # Filter out invalid strata values (Excel errors, null values, etc.)
         print("DEBUG: Before filtering - unique strata:", df_long['strata'].unique().to_list()[:10])
-        df_long = df_long.filter(
-            (pl.col('strata').is_not_null()) &
-            (pl.col('strata') != '#REF!') &
-            (pl.col('strata') != '#N/A') &
-            (pl.col('strata') != '#VALUE!') &
-            (pl.col('strata') != '#DIV/0!') &
-            (pl.col('strata') != '') &
-            (~pl.col('strata').str.starts_with('#'))
+        rows_before = len(df_long)
+
+        # Replace problematic values with 'all_data' instead of filtering them out completely
+        df_long = df_long.with_columns(
+            pl.when(
+                (pl.col('strata').is_null()) |
+                (pl.col('strata') == '') |
+                (pl.col('strata') == '#REF!') |
+                (pl.col('strata') == '#N/A') |
+                (pl.col('strata') == '#VALUE!') |
+                (pl.col('strata') == '#DIV/0!') |
+                (pl.col('strata').str.starts_with('#'))
+            )
+            .then(pl.lit('all_data'))
+            .otherwise(pl.col('strata'))
+            .alias('strata')
         )
+
+        rows_after = len(df_long)
+        print(f"DEBUG: After strata cleaning - rows: {rows_after} (removed {rows_before - rows_after})")
         print("DEBUG: After filtering - unique strata:", df_long['strata'].unique().to_list()[:10])
 
         return df_long
@@ -927,9 +974,27 @@ class ValidationDB:
             # Use all predictions (no confidence filtering at strata creation)
             filtered_df = self.predictions_df
 
+            print(f"DEBUG: predictions_df has {len(filtered_df)} rows")
+            print(f"DEBUG: predictions_df columns: {filtered_df.columns}")
+
+            # Check if strata column exists
+            if 'strata' not in filtered_df.columns:
+                return {
+                    'status': 'error',
+                    'message': 'No strata column found in predictions. Load predictions with strata information first.'
+                }
+
             # Get unique strata from the strata column
             unique_strata = filtered_df.select('strata').unique().to_series().to_list()
             print(f"DEBUG: Found {len(unique_strata)} unique strata: {unique_strata}")
+
+            # Check for problematic strata values
+            null_strata_count = filtered_df.filter(pl.col('strata').is_null()).height
+            empty_strata_count = filtered_df.filter(pl.col('strata') == '').height
+            if null_strata_count > 0:
+                print(f"WARNING: Found {null_strata_count} predictions with null strata")
+            if empty_strata_count > 0:
+                print(f"WARNING: Found {empty_strata_count} predictions with empty strata")
 
             # Create strata definitions and validation progress records
             strata_mapping = {}

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { toast } from 'react-toastify';
-import SpectrogramViewer, { formatTime, formatFreq } from './SpectrogramViewer';
+import SpectrogramViewer, { formatTime, formatFreq, renderSpectrogramWithAxes } from './SpectrogramViewer';
 import SpectrogramOptions from './SpectrogramOptions';
 import {
   Box,
@@ -31,6 +31,13 @@ import {
   Slider,
   IconButton,
   Tooltip,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Paper,
 } from '@mui/material';
 import {
   FolderOpen as LoadIcon,
@@ -45,6 +52,7 @@ import {
   NavigateBefore as PrevIcon,
   Save as SaveIcon,
   Tune as TuneIcon,
+  ExpandMore as ExpandMoreIcon,
 } from '@mui/icons-material';
 
 const ValidationInterface = ({ isActive = true }) => {
@@ -99,6 +107,13 @@ const ValidationInterface = ({ isActive = true }) => {
   const [spectrogramMetadata, setSpectrogramMetadata] = useState(null);
   const [colorMode, setColorMode] = useState('viridis');
 
+  // Clip labels (for showing other confirmed labels)
+  const [clipLabels, setClipLabels] = useState(null);
+
+  // Clip predictions (all species scores for current clip)
+  const [clipPredictions, setClipPredictions] = useState([]);
+  const [showPredictions, setShowPredictions] = useState(false);
+
   // Spectrogram options state
   const [spectrogramOptions, setSpectrogramOptions] = useState({
     color_mode: 'viridis',
@@ -126,15 +141,49 @@ const ValidationInterface = ({ isActive = true }) => {
     { value: 'inferno', label: 'Inferno' },
   ];
 
+  // Helper function to reset validation session state - used when filters change
+  const resetValidationSession = () => {
+    setCurrentClip(null);
+    setValidationQueue([]);
+    setQueueIndex(0);
+  };
+
   // Effects
   useEffect(() => { loadAvailableStrata(); }, []);
   useEffect(() => { if (selectedStrata) loadAvailableSpecies(selectedStrata); }, [selectedStrata]);
+
+  // Reset validation session when filters change - user must click "Start" to apply
+  useEffect(() => {
+    if (currentClip) {
+      resetValidationSession();
+      toast.info('Selection strategy changed. Click "Start" to apply new filters.');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectionStrategy]);
+
+  useEffect(() => {
+    if (currentClip) {
+      resetValidationSession();
+      toast.info('Status filter changed. Click "Start" to apply new filters.');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [validationStatusFilter]);
+
+  useEffect(() => {
+    if (currentClip) {
+      resetValidationSession();
+      toast.info('Confidence threshold changed. Click "Start" to apply new filters.');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [validationRules.confidence_threshold]);
   
   // Load media resources whenever currentClip changes
   useEffect(() => {
     if (currentClip) {
         loadAudio(currentClip);
         loadSpectrogram(currentClip);
+        loadClipLabels(currentClip);
+        loadClipPredictions(currentClip);
         // Preload next clip after a short delay
         setTimeout(() => preloadNextClip(), 100);
 
@@ -142,7 +191,9 @@ const ValidationInterface = ({ isActive = true }) => {
         if (validationAreaRef.current) {
             // Use setTimeout to ensure the DOM has updated
             setTimeout(() => {
-                validationAreaRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                if (validationAreaRef.current) {
+                    validationAreaRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }
             }, 50);
         }
     }
@@ -288,12 +339,26 @@ const ValidationInterface = ({ isActive = true }) => {
     finally { setIsSaving(false); }
   };
 
-  const saveSpectrogram = () => {
+  const saveSpectrogram = async () => {
     if (!spectrogramUrl) return;
-    const link = document.createElement('a');
-    link.href = spectrogramUrl;
-    link.download = `spectrogram_${currentClip?.clip_id || 'clip'}.png`;
-    link.click();
+
+    try {
+      // Render spectrogram with axes
+      const blob = await renderSpectrogramWithAxes(spectrogramUrl, spectrogramMetadata);
+
+      // Create download link
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `spectrogram_${currentClip?.clip_id || 'clip'}.png`;
+      link.click();
+
+      // Clean up
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to save spectrogram:', error);
+      toast.error('Failed to save spectrogram image');
+    }
   };
 
   const saveAudio = () => {
@@ -402,6 +467,60 @@ const ValidationInterface = ({ isActive = true }) => {
     } catch (e) { console.error("Spectrogram error", e); }
   };
 
+  const loadClipLabels = async (clipData) => {
+    if (!clipData || !clipData.audio_file_path) {
+      console.log('[ClipLabels] No clip data provided');
+      setClipLabels(null);
+      return;
+    }
+    try {
+      // Extract filename from full path
+      const filename = clipData.audio_file_path.split('/').pop();
+      const start_time = clipData.start_time || 0;
+      const end_time = clipData.end_time || 0;
+      const current_species = clipData.species_name || selectedSpecies;
+
+      console.log('[ClipLabels] Requesting labels for:', { filename, start_time, end_time, current_species });
+      const response = await axios.get('/api/validation/clip-labels', {
+        params: { filename, start_time, end_time, current_species }
+      });
+
+      console.log('[ClipLabels] Response:', response.data);
+
+      // Extract class_labels array from response
+      const labels = response.data.class_labels || [];
+      console.log('[ClipLabels] Setting clipLabels to:', labels);
+      setClipLabels(labels);
+    } catch (error) {
+      console.error('[ClipLabels] Failed to load clip labels:', error);
+      setClipLabels(null);
+    }
+  };
+
+  const loadClipPredictions = async (clipData) => {
+    if (!clipData || !clipData.audio_file_path) {
+      setClipPredictions([]);
+      return;
+    }
+    try {
+      // Extract filename from full path
+      const filename = clipData.audio_file_path.split('/').pop();
+      const start_time = clipData.start_time || 0;
+      const end_time = clipData.end_time || 0;
+
+      const response = await axios.get('/api/validation/clip-predictions', {
+        params: { filename, start_time, end_time }
+      });
+
+      // Extract predictions array from response
+      const predictions = response.data.predictions || [];
+      setClipPredictions(predictions);
+    } catch (error) {
+      console.error('Failed to load clip predictions:', error);
+      setClipPredictions([]);
+    }
+  };
+
   // Preload the next clip's audio in the background
   const preloadNextClip = () => {
     if (!validationQueue || queueIndex >= validationQueue.length - 1) return;
@@ -453,6 +572,10 @@ const ValidationInterface = ({ isActive = true }) => {
             setCurrentClip(prev => ({ ...prev, annotation_status: validationState }));
         }
 
+        // Reload predictions to update the status in the table
+        loadClipPredictions(currentClip);
+        loadClipLabels(currentClip);
+
         // Check target condition based on mode
         let targetMet = false;
         const targetValue = validationRules.target_confirmations;
@@ -488,10 +611,10 @@ const ValidationInterface = ({ isActive = true }) => {
 
     setIsValidating(true);
     try {
-        const response = await axios.delete('/api/active-learning/annotation', {
+        const response = await axios.delete('/api/validation/delete-annotation', {
             params: {
-                clip_id: currentClip.prediction_id,
-                class_name: selectedSpecies
+                prediction_id: currentClip.prediction_id,
+                species_name: selectedSpecies
             }
         });
 
@@ -522,6 +645,11 @@ const ValidationInterface = ({ isActive = true }) => {
                 setValidationQueue(updatedQueue);
                 setCurrentClip(updatedClip);
             }
+
+            // Reload predictions and labels to update the table
+            loadClipPredictions(currentClip);
+            loadClipLabels(currentClip);
+
             if (validationRules.auto_advance) {
                 advanceToNextClip();
             }
@@ -838,6 +966,7 @@ const ValidationInterface = ({ isActive = true }) => {
 
       {/* Main Validation Area */}
       {currentClip && (
+        <>
         <Grid container spacing={2} ref={validationAreaRef} sx={{ minHeight: 600 }}>
             {/* Left: Spectrogram & Audio */}
             <Grid item xs={12} md={8}>
@@ -954,6 +1083,30 @@ const ValidationInterface = ({ isActive = true }) => {
                           }}
                         />
 
+                        {/* Other Confirmed Labels */}
+                        {currentClip && clipLabels && clipLabels.length > 0 && (
+                            <Box sx={{ mb: 2, p: 1.5, backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 1 }}>
+                                <Typography variant="caption" color="text.secondary" sx={{ mb: 0.75, display: 'block', fontWeight: 600, letterSpacing: '0.05em' }}>
+                                    OTHER CONFIRMED SPECIES
+                                </Typography>
+                                <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                                    {clipLabels.map((label, idx) => (
+                                        <Chip
+                                            key={idx}
+                                            label={label.class_name}
+                                            size="small"
+                                            sx={{
+                                                backgroundColor: '#10b98120',
+                                                color: '#10b981',
+                                                border: '1px solid #10b981',
+                                                fontWeight: 500
+                                            }}
+                                        />
+                                    ))}
+                                </Stack>
+                            </Box>
+                        )}
+
                         {/* Spectrogram Viewer */}
                         <Box sx={{ mb: 2 }}>
                             <SpectrogramViewer
@@ -1034,6 +1187,110 @@ const ValidationInterface = ({ isActive = true }) => {
                 </Card>
             </Grid>
         </Grid>
+
+        {/* Predictions Table - All Species Scores */}
+        {currentClip && clipPredictions.length > 0 && (
+          <Box sx={{ mt: 2 }}>
+            <Card elevation={0} sx={{ border: '1px solid #e0e0e0' }}>
+              <CardHeader
+                title={
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Typography variant="h6">All Species Predictions</Typography>
+                    <IconButton
+                      onClick={() => setShowPredictions(!showPredictions)}
+                      sx={{
+                        transform: showPredictions ? 'rotate(180deg)' : 'rotate(0deg)',
+                        transition: 'transform 0.3s'
+                      }}
+                    >
+                      <ExpandMoreIcon />
+                    </IconButton>
+                  </Box>
+                }
+                subheader={`${clipPredictions.length} species predictions for this clip`}
+                sx={{ pb: 0 }}
+              />
+              <Collapse in={showPredictions}>
+                <CardContent>
+                  <TableContainer component={Paper} variant="outlined">
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow sx={{ backgroundColor: '#f9fafb' }}>
+                          <TableCell sx={{ fontWeight: 'bold' }}>Rank</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold' }}>Species</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold' }} align="right">Confidence</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold' }}>Model</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold' }}>Status</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {clipPredictions.map((pred, idx) => {
+                          // Check if this species has been validated
+                          const isCurrentSpecies = pred.species_name === selectedSpecies;
+                          const validationStatus = pred.validation_status;
+
+                          return (
+                            <TableRow
+                              key={idx}
+                              sx={{
+                                backgroundColor: isCurrentSpecies ? '#fffbeb' : 'inherit',
+                                '&:hover': { backgroundColor: isCurrentSpecies ? '#fef3c7' : '#f9fafb' }
+                              }}
+                            >
+                              <TableCell>{idx + 1}</TableCell>
+                              <TableCell>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                  {pred.species_name}
+                                  {isCurrentSpecies && (
+                                    <Chip label="Current" size="small" color="warning" variant="outlined" />
+                                  )}
+                                </Box>
+                              </TableCell>
+                              <TableCell align="right">
+                                <Typography
+                                  variant="body2"
+                                  sx={{
+                                    fontWeight: 500,
+                                    color: pred.confidence > 0.8 ? 'success.main' :
+                                           pred.confidence > 0.5 ? 'warning.main' :
+                                           'text.secondary'
+                                  }}
+                                >
+                                  {(pred.confidence * 100).toFixed(1)}%
+                                </Typography>
+                              </TableCell>
+                              <TableCell>
+                                <Typography variant="caption" color="text.secondary">
+                                  {pred.model_name || 'N/A'}
+                                </Typography>
+                              </TableCell>
+                              <TableCell>
+                                {validationStatus && (
+                                  <Chip
+                                    label={validationStatus}
+                                    size="small"
+                                    color={
+                                      validationStatus === 'confirmed' ? 'success' :
+                                      validationStatus === 'rejected' ? 'error' :
+                                      validationStatus === 'uncertain' ? 'warning' :
+                                      'default'
+                                    }
+                                    variant="filled"
+                                  />
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                </CardContent>
+              </Collapse>
+            </Card>
+          </Box>
+        )}
+        </>
       )}
 
       {/* Load Project Dialog */}

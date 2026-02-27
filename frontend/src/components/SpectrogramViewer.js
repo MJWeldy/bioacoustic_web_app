@@ -20,6 +20,137 @@ export const formatFreq = (hz) => {
 };
 
 /**
+ * Renders spectrogram with axes to a canvas and returns a downloadable blob
+ * @param {string} spectrogramUrl - URL of the spectrogram image
+ * @param {object} metadata - Spectrogram metadata with time/freq ranges
+ * @returns {Promise<Blob>} - PNG blob of the rendered spectrogram with axes
+ */
+export const renderSpectrogramWithAxes = async (spectrogramUrl, metadata) => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+
+    img.onload = () => {
+      // Canvas dimensions with margins for axes
+      const marginLeft = 80;
+      const marginRight = 20;
+      const marginTop = 20;
+      const marginBottom = 80;
+
+      const canvasWidth = img.width + marginLeft + marginRight;
+      const canvasHeight = img.height + marginTop + marginBottom;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = canvasWidth;
+      canvas.height = canvasHeight;
+      const ctx = canvas.getContext('2d');
+
+      // White background
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+      // Draw spectrogram image
+      ctx.drawImage(img, marginLeft, marginTop);
+
+      // Configure text style
+      ctx.fillStyle = '#000000';
+      ctx.font = '12px Arial';
+      ctx.textAlign = 'center';
+
+      // Mel scale conversion functions
+      const hzToMel = (hz) => 2595 * Math.log10(1 + hz / 700);
+      const melToHz = (mel) => 700 * (Math.pow(10, mel / 2595) - 1);
+
+      // Draw frequency axis (left side)
+      if (metadata) {
+        const { freq_min, freq_max, freq_scale, time_start, time_end } = metadata;
+        const isLinear = freq_scale === 'linear';
+        const tickCount = 5;
+
+        // Frequency ticks
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+
+        for (let i = 0; i <= tickCount; i++) {
+          let freq;
+          if (isLinear) {
+            freq = freq_max - (i / tickCount) * (freq_max - freq_min);
+          } else {
+            const melMin = hzToMel(freq_min);
+            const melMax = hzToMel(freq_max);
+            const mel = melMax - (i / tickCount) * (melMax - melMin);
+            freq = melToHz(mel);
+          }
+
+          const y = marginTop + (i / tickCount) * img.height;
+
+          // Tick mark
+          ctx.beginPath();
+          ctx.moveTo(marginLeft - 5, y);
+          ctx.lineTo(marginLeft, y);
+          ctx.strokeStyle = '#000000';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+
+          // Tick label
+          const label = formatFreq(freq);
+          ctx.fillText(label, marginLeft - 10, y);
+        }
+
+        // Frequency axis label
+        ctx.save();
+        ctx.translate(15, marginTop + img.height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 14px Arial';
+        ctx.fillText('Frequency (Hz)', 0, 0);
+        ctx.restore();
+
+        // Time axis (bottom)
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+
+        const totalDuration = time_end - time_start;
+        const timeTickCount = 6;
+
+        for (let i = 0; i <= timeTickCount; i++) {
+          const time = time_start + (i / timeTickCount) * totalDuration;
+          const x = marginLeft + (i / timeTickCount) * img.width;
+
+          // Tick mark
+          ctx.beginPath();
+          ctx.moveTo(x, marginTop + img.height);
+          ctx.lineTo(x, marginTop + img.height + 5);
+          ctx.stroke();
+
+          // Tick label
+          ctx.fillText(formatTime(time), x, marginTop + img.height + 10);
+        }
+
+        // Time axis label
+        ctx.font = 'bold 14px Arial';
+        ctx.fillText('Time (mm:ss)', marginLeft + img.width / 2, marginTop + img.height + 50);
+      }
+
+      // Convert canvas to blob
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(blob);
+        } else {
+          reject(new Error('Failed to create image blob'));
+        }
+      }, 'image/png');
+    };
+
+    img.onerror = () => {
+      reject(new Error('Failed to load spectrogram image'));
+    };
+
+    img.src = spectrogramUrl;
+  });
+};
+
+/**
  * Modern spectrogram viewer with clean design and abstracted UI elements
  * Aesthetic: Scientific Precision - dark theme, calibrated colors, professional appearance
  */
@@ -131,30 +262,8 @@ const SpectrogramViewer = ({
     return ticks;
   };
 
-  // Generate amplitude/dB gradient stops
-  const generateAmplitudeGradient = () => {
-    if (!metadata) return [];
-    const { db_min, db_max } = metadata;
-    const stops = [];
-    const stepCount = 8;
-
-    for (let i = 0; i <= stepCount; i++) {
-      const db = db_max - (i / stepCount) * (db_max - db_min);
-      const position = (i / stepCount) * 100;
-
-      stops.push({
-        position,
-        db,
-        label: `${db.toFixed(0)}`
-      });
-    }
-
-    return stops;
-  };
-
   const timeTicks = generateTimeTicks();
   const freqTicks = generateFreqTicks();
-  const amplitudeStops = generateAmplitudeGradient();
 
   return (
     <div className={`spectrogram-viewer ${className}`}>
@@ -217,23 +326,6 @@ const SpectrogramViewer = ({
               <div className="playhead-head"></div>
             </div>
           )}
-        </div>
-
-        {/* Amplitude Scale (Right) */}
-        <div className="amplitude-scale">
-          <div className="scale-label">dB</div>
-          <div className="amplitude-gradient">
-            {amplitudeStops.map((stop, idx) => (
-              <div
-                key={idx}
-                className="amplitude-tick"
-                style={{ top: `${stop.position}%` }}
-              >
-                <span className="tick-label">{stop.label}</span>
-                <span className="tick-mark"></span>
-              </div>
-            ))}
-          </div>
         </div>
       </div>
 
