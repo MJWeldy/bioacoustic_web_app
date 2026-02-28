@@ -1611,16 +1611,21 @@ async def get_validation_clip_labels(filename: str, start_time: float, end_time:
         }
 
     try:
+        import os
         print(f"DEBUG: get_validation_clip_labels called with filename={filename}, start_time={start_time}, end_time={end_time}, current_species={current_species}")
 
         validation_db = app_state["validation_db"]
+
+        # Extract base filename (handle both full paths and base filenames)
+        base_filename = os.path.basename(filename)
+        print(f"DEBUG: get_validation_clip_labels - base filename: {base_filename}")
 
         # Find all validation annotations for this clip (same file and time range)
         # Use tolerance for floating point comparison
         tolerance = 0.1  # 100ms tolerance
 
         matching_annotations = validation_db.validation_annotations_df.filter(
-            (pl.col("filename") == filename) &
+            ((pl.col("filename") == filename) | (pl.col("filename") == base_filename)) &
             (pl.col("start_time") >= start_time - tolerance) &
             (pl.col("start_time") <= start_time + tolerance) &
             (pl.col("end_time") >= end_time - tolerance) &
@@ -1708,23 +1713,32 @@ async def get_clip_predictions(filename: str, start_time: float, end_time: float
         raise HTTPException(status_code=400, detail="No validation database loaded")
 
     try:
+        import os
         validation_db = app_state["validation_db"]
+
+        # Extract base filename (handle both full paths and base filenames)
+        base_filename = os.path.basename(filename)
+        print(f"DEBUG: get_clip_predictions - input filename: {filename}")
+        print(f"DEBUG: get_clip_predictions - base filename: {base_filename}")
 
         # Find all predictions for this clip (same file and time range)
         # Use tolerance for floating point comparison
         tolerance = 0.1  # 100ms tolerance
 
+        # Try matching with both full filename and base filename
         matching_predictions = validation_db.predictions_df.filter(
-            (pl.col("filename") == filename) &
+            ((pl.col("filename") == filename) | (pl.col("filename") == base_filename)) &
             (pl.col("start_time") >= start_time - tolerance) &
             (pl.col("start_time") <= start_time + tolerance) &
             (pl.col("end_time") >= end_time - tolerance) &
             (pl.col("end_time") <= end_time + tolerance)
         )
 
+        print(f"DEBUG: get_clip_predictions - found {len(matching_predictions)} matching predictions")
+
         # Get all validation annotations for this clip
         matching_annotations = validation_db.validation_annotations_df.filter(
-            (pl.col("filename") == filename) &
+            ((pl.col("filename") == filename) | (pl.col("filename") == base_filename)) &
             (pl.col("start_time") >= start_time - tolerance) &
             (pl.col("start_time") <= start_time + tolerance) &
             (pl.col("end_time") >= end_time - tolerance) &
