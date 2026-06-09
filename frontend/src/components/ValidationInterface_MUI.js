@@ -475,12 +475,28 @@ const ValidationInterface = ({ isActive = true }) => {
             clip_start: clipData.start_time || 0,
             clip_end: clipData.end_time || 0,
             ...spectrogramOptions  // Include all spectrogram options
+        }, {
+            timeout: 30000  // 30 second timeout
         });
         if (specRes.data.spectrogram) {
             setSpectrogramUrl(specRes.data.spectrogram);
             setSpectrogramMetadata(specRes.data.metadata || null);
+        } else {
+            console.error("Spectrogram: No spectrogram data in response");
+            toast.error("Failed to generate spectrogram - no data returned");
         }
-    } catch (e) { console.error("Spectrogram error", e); }
+    } catch (e) {
+        console.error("Spectrogram error", e);
+        if (e.code === 'ECONNABORTED') {
+            toast.error("Spectrogram generation timed out (>30s). File may be too large or corrupted.");
+        } else if (e.response?.status === 500) {
+            toast.error(`Spectrogram error: ${e.response?.data?.detail || 'Unknown error'}`);
+        } else if (e.response?.status === 404) {
+            toast.error("Audio file not found - check file path");
+        } else {
+            toast.error("Failed to load spectrogram - check console for details");
+        }
+    }
   };
 
   const loadClipLabels = async (clipData) => {

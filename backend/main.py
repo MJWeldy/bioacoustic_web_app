@@ -2138,6 +2138,9 @@ def generate_spectrogram(request: SpectrogramRequest):
             nyquist = cfg.MODEL_SR // 2
             fmax = request.fmax if request.fmax is not None else min(cfg.MAX_FREQ, nyquist)
 
+            # Memory cleanup even for cached spectrograms
+            gc.collect()
+
             return {
                 "spectrogram": f"data:image/png;base64,{image_data}",
                 "metadata": {
@@ -2206,6 +2209,10 @@ def generate_spectrogram(request: SpectrogramRequest):
         except Exception as e:
             print(f"Spectrogram cache save error (non-fatal): {e}")
 
+        # Memory cleanup after spectrogram generation
+        gc.collect()
+        plt.close('all')
+
         # Return spectrogram with metadata for frontend scales
         return {
             "spectrogram": spectrogram_base64,
@@ -2213,6 +2220,9 @@ def generate_spectrogram(request: SpectrogramRequest):
         }
 
     except Exception as e:
+        # Cleanup on error
+        plt.close('all')
+        gc.collect()
         raise HTTPException(status_code=500, detail=str(e))
 
 # Evaluation endpoints
