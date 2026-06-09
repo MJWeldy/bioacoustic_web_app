@@ -52,6 +52,7 @@ const DatasetBuilder = () => {
 
   const backendOptions = [
     { value: 'PERCH', label: 'PERCH (v8)' },
+    { value: 'PERCH2_GPU', label: 'PERCH v2 (1536-dim)' },
     { value: 'BirdNET_2.4', label: 'BirdNET 2.4' },
     { value: 'PNWCnet', label: 'PNWCnet' },
     { value: 'PNWCnet_EXPANDED', label: 'PNWCnet Expanded' },

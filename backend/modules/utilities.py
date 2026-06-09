@@ -2,6 +2,7 @@ import os
 import tensorflow as tf
 import tensorflow_hub as hub
 import numpy as np
+import gc
 
 import soundfile as sf
 import librosa
@@ -26,16 +27,19 @@ BACKEND = os.environ.get("BACKEND", "PERCH")
 #    return e_model
 
 def load_audio(file_path, start_stop):
-    """Load audio file"""
-    if not start_stop: 
-        audio, sample_rate = sf.read(file_path)
-    else:
-        start, stop, sr = start_stop
-        audio, sample_rate = sf.read(file_path, start = int(start*sr), stop = int(stop*sr) )
-    if sample_rate != cfg.TARGET_SR:
-        audio = librosa.resample(audio.T, orig_sr=sample_rate, target_sr=cfg.TARGET_SR)
-        audio = audio.T
-    return np.array(audio)  # tf.squeeze(audio)
+    """Load audio file with error handling for corrupted/unreadable files"""
+    try:
+        if not start_stop:
+            audio, sample_rate = sf.read(file_path)
+        else:
+            start, stop, sr = start_stop
+            audio, sample_rate = sf.read(file_path, start = int(start*sr), stop = int(stop*sr) )
+        if sample_rate != cfg.TARGET_SR:
+            audio = librosa.resample(audio.T, orig_sr=sample_rate, target_sr=cfg.TARGET_SR)
+            audio = audio.T
+        return np.array(audio)  # tf.squeeze(audio)
+    except Exception as e:
+        raise RuntimeError(f"Error loading audio file '{file_path}': {str(e)}")
 
 @tf.function
 def normalize_audio(audio, norm_factor):
@@ -76,29 +80,130 @@ def frame_audio(audio_array: np.ndarray) -> np.ndarray: #,
 
     return framed_audio  # tf.squeeze(framed_audio, axis=0)
 
-def load_and_preprocess(files):
+def load_and_preprocess(files, batch_size=10, progress_callback=None):
+    """
+    Process audio files in batches to manage GPU memory.
+
+    Args:
+        files: List of file paths to process
+        batch_size: Number of files to process per batch (default: 10)
+        progress_callback: Optional callback function(current, total, message) for progress updates
+
+    Returns:
+        Tuple of (embeddings, valid_files, failed_files) where:
+        - embeddings: List of embeddings for successfully processed files
+        - valid_files: List of file paths that were successfully processed
+        - failed_files: List of file paths that failed to process
+    """
+    failed_files = []
+    valid_files = []
+
     if BACKEND == "PERCH" or BACKEND == "PERCH_IGNORE_SR":
         e_model = hub.load(
             f"https://www.kaggle.com/models/google/bird-vocalization-classifier/frameworks/TensorFlow2/variations/bird-vocalization-classifier/versions/{cfg.PERCH_V}"
         )
-        e = list(map(lambda f: process_with_perch(f, e_model), files))
+        e = []
+        total_files = len(files)
+
+        for batch_start in range(0, total_files, batch_size):
+            batch_end = min(batch_start + batch_size, total_files)
+            batch_files = files[batch_start:batch_end]
+
+            if progress_callback:
+                progress_callback(batch_start, total_files, f"Processing files {batch_start+1}-{batch_end} of {total_files}")
+
+            # Process batch
+            batch_embeddings = list(map(lambda f: process_with_perch(f, e_model), batch_files))
+
+            # Separate valid and failed files
+            for i, emb in enumerate(batch_embeddings):
+                if emb is not None:
+                    # Move embeddings to CPU and convert to numpy to free GPU memory
+                    emb_cpu = emb.numpy() if hasattr(emb, 'numpy') else emb
+                    e.append(emb_cpu)
+                    valid_files.append(batch_files[i])
+                else:
+                    failed_files.append(batch_files[i])
+
+            # Clear GPU memory and run garbage collection
+            gc.collect()
+            tf.keras.backend.clear_session()
+
+    elif BACKEND == "PERCH2_GPU":
+        e_model = hub.load(
+            "https://www.kaggle.com/models/google/bird-vocalization-classifier/tensorFlow2/perch_v2/2"
+        )
+        e = []
+        total_files = len(files)
+
+        for batch_start in range(0, total_files, batch_size):
+            batch_end = min(batch_start + batch_size, total_files)
+            batch_files = files[batch_start:batch_end]
+
+            if progress_callback:
+                progress_callback(batch_start, total_files, f"Processing files {batch_start+1}-{batch_end} of {total_files}")
+
+            # Process batch
+            batch_embeddings = list(map(lambda f: process_with_perch2(f, e_model), batch_files))
+
+            # Separate valid and failed files
+            for i, emb in enumerate(batch_embeddings):
+                if emb is not None:
+                    # Move embeddings to CPU and convert to numpy to free GPU memory
+                    emb_cpu = emb.numpy() if hasattr(emb, 'numpy') else emb
+                    e.append(emb_cpu)
+                    valid_files.append(batch_files[i])
+                else:
+                    failed_files.append(batch_files[i])
+
+            # Clear GPU memory and run garbage collection
+            gc.collect()
+            tf.keras.backend.clear_session()
+
     elif BACKEND == "BirdNET_2.4":
         e = process_with_birdnet(files)
-    return e
+        valid_files = files  # BirdNET handles its own errors
+        failed_files = []
+
+    return e, valid_files, failed_files
 
 def process_with_perch(file_path, e_model):
-    audio = load_audio(file_path, None)  
-    #if len(audio.shape) < 2:
-    #    audio = audio[np.newaxis,]
-    audio = tf.cast(audio, tf.float32)
-    normalized_audio = normalize_audio(audio, 0.25)
-    framed_audio = frame_audio(normalized_audio)
-    if len(framed_audio.shape) > 2:
-        framed_audio = tf.squeeze(framed_audio)
-    
-    e = e_model.infer_tf(framed_audio)
-    e = e["embedding"]
-    return e
+    """Process audio with PERCH model. Returns None if file cannot be processed."""
+    try:
+        audio = load_audio(file_path, None)
+        #if len(audio.shape) < 2:
+        #    audio = audio[np.newaxis,]
+        audio = tf.cast(audio, tf.float32)
+        normalized_audio = normalize_audio(audio, 0.25)
+        framed_audio = frame_audio(normalized_audio)
+        if len(framed_audio.shape) > 2:
+            framed_audio = tf.squeeze(framed_audio)
+
+        e = e_model.infer_tf(framed_audio)
+        e = e["embedding"]
+        return e
+    except Exception as e:
+        print(f"⚠ Warning: Failed to process {file_path}: {str(e)}")
+        return None
+
+def process_with_perch2(file_path, e_model):
+    """Process audio with PERCH v2 model and extract dictionary embeddings (1536-dim). Returns None if file cannot be processed."""
+    try:
+        audio = load_audio(file_path, None)
+        audio = tf.cast(audio, tf.float32)
+        normalized_audio = normalize_audio(audio, 0.25)
+        framed_audio = frame_audio(normalized_audio)
+        if len(framed_audio.shape) > 2:
+            framed_audio = tf.squeeze(framed_audio)
+
+        # PERCH v2 returns a dictionary with 'embedding' (1536-dim) and 'embedding_spatial'
+        # We use the dictionary embeddings as requested
+        e = e_model.infer_tf(framed_audio)
+        e = e["embedding"]  # Extract 1536-dimensional dictionary embeddings
+        return e
+    except Exception as e:
+        print(f"⚠ Warning: Failed to process {file_path}: {str(e)}")
+        return None
 
 def process_with_birdnet(files):
     """Process audio frames with BirdNET TFLite model

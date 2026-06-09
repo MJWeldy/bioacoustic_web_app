@@ -16,6 +16,7 @@ from sklearn.model_selection import train_test_split
 import threading
 import time
 from datetime import datetime
+import gc
 
 # Import our modules
 from modules import config as cfg
@@ -102,10 +103,11 @@ def get_spectrogram_cache_key(file_path: str, start: float, end: float, color_mo
                               freq_scale: str = "mel", n_mels: int = 256, n_fft: int = 2048,
                               hop_length: int = 128, window_size: Optional[int] = None,
                               fmin: Optional[float] = None, fmax: Optional[float] = None,
-                              bandpass_min: Optional[float] = None, bandpass_max: Optional[float] = None) -> str:
+                              bandpass_min: Optional[float] = None, bandpass_max: Optional[float] = None,
+                              buffer_enabled: bool = True) -> str:
     """Generate unique cache key for a spectrogram including all parameters"""
-    # Version 3: Spectrograms with customizable parameters
-    cache_string = f"v3_{file_path}_{start}_{end}_{color_mode}_{freq_scale}_{n_mels}_{n_fft}_{hop_length}_{window_size}_{fmin}_{fmax}_{bandpass_min}_{bandpass_max}"
+    # Version 4: Added buffer_enabled parameter
+    cache_string = f"v4_{file_path}_{start}_{end}_{color_mode}_{freq_scale}_{n_mels}_{n_fft}_{hop_length}_{window_size}_{fmin}_{fmax}_{bandpass_min}_{bandpass_max}_{buffer_enabled}"
     return hashlib.md5(cache_string.encode()).hexdigest() + ".png"
 
 def get_spectrogram_cache_size() -> int:
@@ -182,6 +184,7 @@ class SpectrogramRequest(BaseModel):
     fmax: Optional[float] = None  # maximum frequency (Hz)
     bandpass_min: Optional[float] = None  # bandpass filter min frequency (Hz)
     bandpass_max: Optional[float] = None  # bandpass filter max frequency (Hz)
+    buffer_enabled: bool = True  # add 1-second buffer on each side for context
 
 class TrainingParams(BaseModel):
     model_config = {'protected_namespaces': ()}
@@ -246,7 +249,10 @@ def build_dataset_thread(config: DatasetConfig):
         building_state["total_files"] = len(files)
         building_state["message"] = f"Processing {len(files)} audio files..."
         building_state["progress"] = 10
-        
+
+        # Track failed files throughout the process
+        failed_files = []
+
         # Create embeddings and labels for evaluation datasets
         embeddings_path = Path(config.save_path) / "embeddings.pkl"
         if embeddings_path.exists():
@@ -264,10 +270,46 @@ def build_dataset_thread(config: DatasetConfig):
         else:
             building_state["message"] = "Generating embeddings..."
             building_state["progress"] = 20
-            
-            embeddings = u.load_and_preprocess(files)
-            labels = None
-            
+
+            # Progress callback for batched processing
+            def update_embedding_progress(current, total, message):
+                progress_percent = 20 + int(40 * current / total)  # 20% to 60%
+                building_state["progress"] = progress_percent
+                building_state["message"] = f"Generating embeddings: {message}"
+
+            try:
+                # Process with batch size of 10 files to manage GPU memory
+                embeddings, valid_files, embedding_failed_files = u.load_and_preprocess(files, batch_size=10, progress_callback=update_embedding_progress)
+
+                # Update files list to only include successfully processed files
+                if embedding_failed_files:
+                    print(f"⚠ Warning: {len(embedding_failed_files)} files failed to process and will be skipped")
+                    for failed_file in embedding_failed_files:
+                        print(f"  - {failed_file}")
+                    failed_files.extend(embedding_failed_files)
+                    files = valid_files
+                    building_state["message"] = f"Embeddings generated ({len(embedding_failed_files)} files skipped due to errors)"
+
+                # Check if we have any valid files left
+                if not files or len(files) == 0:
+                    building_state["status"] = "error"
+                    building_state["message"] = "All files failed to process. No valid audio files to create dataset."
+                    return
+
+                print(f"✓ Successfully processed {len(files)} files, generated {len(embeddings)} embeddings")
+
+                labels = None
+            except Exception as e:
+                error_msg = str(e)
+                # Check for GPU OOM errors
+                if "out of memory" in error_msg.lower() or "OOM" in error_msg or "Allocator" in error_msg:
+                    building_state["status"] = "error"
+                    building_state["message"] = "GPU out of memory. Try processing fewer files at once or use a smaller model."
+                    return
+                else:
+                    # Re-raise other errors
+                    raise
+
             building_state["progress"] = 60
             
             # For evaluation datasets, extract labels from filenames
@@ -282,68 +324,111 @@ def build_dataset_thread(config: DatasetConfig):
             
             building_state["progress"] = 70
             building_state["message"] = "Saving embeddings..."
-            
+
             os.makedirs(config.save_path, exist_ok=True)
-            
+            print(f"Saving embeddings to: {embeddings_path}")
+
             # Save embeddings and labels together for evaluation datasets
-            if config.is_evaluation_dataset and labels is not None:
-                embeddings_data = {
-                    'embeddings': embeddings,
-                    'labels': labels
-                }
-                with open(embeddings_path, "wb") as f:
-                    pickle.dump(embeddings_data, f)
-            else:
-                with open(embeddings_path, "wb") as f:
-                    pickle.dump(embeddings, f)
+            try:
+                if config.is_evaluation_dataset and labels is not None:
+                    embeddings_data = {
+                        'embeddings': embeddings,
+                        'labels': labels
+                    }
+                    with open(embeddings_path, "wb") as f:
+                        pickle.dump(embeddings_data, f)
+                else:
+                    with open(embeddings_path, "wb") as f:
+                        pickle.dump(embeddings, f)
+                print(f"✓ Embeddings saved successfully to: {embeddings_path}")
+            except Exception as e:
+                print(f"✗ Error saving embeddings: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                building_state["status"] = "error"
+                building_state["message"] = f"Error saving embeddings: {str(e)}"
+                return
         
         app_state["embeddings"] = embeddings
         
         building_state["message"] = "Creating audio database..."
         building_state["progress"] = 85
-        
+
         # Create audio database with number of classes
         class_map = {item.name: item.value for item in config.class_map}
         num_classes = len(class_map)
+
+        print(f"Creating database with {num_classes} classes for {len(files)} files")
+
         audio_db = db.Audio_DB(num_classes=num_classes)
         audio_db.class_map = class_map
         embedding_index = 0  # Track embedding indices as clips are created
-        
+        db_failed_files = []  # Track files that fail during database creation
+
         for i, file_path in enumerate(files):
             building_state["processed_files"] = i + 1
             building_state["progress"] = 85 + (10 * i // len(files))
-            
-            import soundfile as sf
-            f = sf.SoundFile(file_path)
-            duration_sec = f.frames / f.samplerate
-            file_name = Path(file_path).stem
-            
-            # Add file and clips using new structure
-            audio_db.add_file_and_clips(
-                file_name=file_name,
-                file_path=str(file_path),
-                duration_sec=duration_sec,
-                sampling_rate=cfg.TARGET_SR,
-                window_size=cfg.WINDOW,
-                embedding_start_index=embedding_index
-            )
-            
-            # Calculate how many clips were created for this file
-            clips_in_file = int(np.ceil(duration_sec / cfg.WINDOW))
-            embedding_index += clips_in_file
-        
+
+            try:
+                import soundfile as sf
+                f = sf.SoundFile(file_path)
+                duration_sec = f.frames / f.samplerate
+                file_name = Path(file_path).stem
+
+                # Add file and clips using new structure
+                audio_db.add_file_and_clips(
+                    file_name=file_name,
+                    file_path=str(file_path),
+                    duration_sec=duration_sec,
+                    sampling_rate=cfg.TARGET_SR,
+                    window_size=cfg.WINDOW,
+                    embedding_start_index=embedding_index
+                )
+
+                # Calculate how many clips were created for this file
+                clips_in_file = int(np.ceil(duration_sec / cfg.WINDOW))
+                embedding_index += clips_in_file
+            except Exception as e:
+                print(f"⚠ Warning: Failed to add {file_path} to database: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                db_failed_files.append(str(file_path))
+
+        print(f"✓ Database created with {len(audio_db.clips_df)} clips from {len(audio_db.files_df)} files")
+
+        # Check if database is empty
+        if len(audio_db.clips_df) == 0:
+            building_state["status"] = "error"
+            building_state["message"] = "Failed to create database: All files failed during database creation"
+            print("✗ Error: Database is empty after processing all files")
+            return
+
         app_state["audio_db"] = audio_db
         
         building_state["message"] = "Saving database..."
         building_state["progress"] = 95
-        
+
         # Save database (will save all three tables)
         db_path = Path(config.save_path) / "audio_database.parquet"
-        audio_db.save_db(str(db_path))
+        print(f"Saving database to: {db_path}")
+        try:
+            audio_db.save_db(str(db_path))
+            print(f"✓ Database saved successfully to: {db_path}")
+        except Exception as e:
+            print(f"✗ Error saving database: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            building_state["status"] = "error"
+            building_state["message"] = f"Error saving database: {str(e)}"
+            return
         
         building_state["message"] = f"Saving metadata to {config.save_path}/metadata.json..."
         building_state["progress"] = 98
-        
+
+        # Merge all failed files
+        if db_failed_files:
+            failed_files.extend(db_failed_files)
+
         # Create and save metadata
         metadata = {
             "dataset_info": {
@@ -359,7 +444,8 @@ def build_dataset_thread(config: DatasetConfig):
                 "total_files": len(files),
                 "total_clips": len(audio_db.clips_df),
                 "window_size": cfg.WINDOW,
-                "sample_rate": cfg.TARGET_SR
+                "sample_rate": cfg.TARGET_SR,
+                "failed_files_count": len(failed_files) if failed_files else 0
             },
             "file_paths": {
                 "embeddings": str(embeddings_path),
@@ -367,23 +453,31 @@ def build_dataset_thread(config: DatasetConfig):
                 "metadata": str(Path(config.save_path) / "metadata.json")
             }
         }
+
+        # Add failed files list if any files failed
+        if failed_files:
+            metadata["failed_files"] = [str(f) for f in failed_files]
         
         # Save metadata to JSON file
         metadata_path = Path(config.save_path) / "metadata.json"
+        print(f"Saving metadata to: {metadata_path}")
         try:
             with open(metadata_path, "w") as f:
                 json.dump(metadata, f, indent=2)
             print(f"✓ Metadata saved to: {metadata_path}")
         except Exception as e:
             print(f"✗ Error saving metadata to {metadata_path}: {e}")
+            import traceback
+            traceback.print_exc()
             # Continue without failing the whole process
         
         # Complete
         dataset_type = "evaluation" if config.is_evaluation_dataset else "active_learning"
         labels_info = f" with labels extracted from filenames" if config.is_evaluation_dataset else ""
-        
+        skipped_info = f" ({len(failed_files)} files skipped due to errors)" if failed_files else ""
+
         building_state["status"] = "completed"
-        building_state["message"] = f"{dataset_type.title()} dataset created with {len(files)} files and {len(audio_db.clips_df)} clips{labels_info}"
+        building_state["message"] = f"{dataset_type.title()} dataset created with {len(files)} files and {len(audio_db.clips_df)} clips{labels_info}{skipped_info}"
         building_state["progress"] = 100
         building_state["files_count"] = len(files)
         building_state["clips_count"] = len(audio_db.clips_df)
@@ -1167,9 +1261,11 @@ async def load_classifier(classifier_path: str):
                 embeddings_list = app_state["embeddings"]
                 print(f"DEBUG: embeddings_list type: {type(embeddings_list)}")
                 print(f"DEBUG: embeddings_list length: {len(embeddings_list) if hasattr(embeddings_list, '__len__') else 'No length'}")
-                
-                if not isinstance(embeddings_list, list) or len(embeddings_list) == 0:
-                    raise ValueError("Invalid embeddings format")
+
+                if not isinstance(embeddings_list, list):
+                    raise ValueError(f"Invalid embeddings format: expected list, got {type(embeddings_list)}")
+                if len(embeddings_list) == 0:
+                    raise ValueError("Embeddings list is empty")
                 
                 print(f"DEBUG: Starting frame-wise processing for {len(embeddings_list)} embedding tensors")
                 
@@ -1177,67 +1273,130 @@ async def load_classifier(classifier_path: str):
                 audio_db = app_state["audio_db"]
                 total_clips = len(audio_db.clips_df)
                 print(f"DEBUG: Database has {total_clips} clips")
-                
+
                 # Get frame-wise predictions for all embeddings and map to clips
                 all_clip_predictions = []
-                
-                # Get clips with file information
-                clips_with_files = audio_db.get_clips_with_files()
-                
-                # Get unique files and their clips
-                file_groups = clips_with_files.group_by("file_name", maintain_order=True)
-                
-                for file_idx, (file_group_key, file_clips_df) in enumerate(file_groups):
-                    if file_idx >= len(embeddings_list):
-                        print(f"WARNING: More files in database than embeddings available")
-                        break
-                        
-                    file_name = file_group_key[0]  # file_name is the grouping key
-                    num_clips_for_file = len(file_clips_df)
-                    print(f"DEBUG: File {file_name} has {num_clips_for_file} clips")
-                    
-                    # Get embedding tensor for this file
-                    emb_tensor = embeddings_list[file_idx]
-                    
-                    # Convert to numpy if it's a TensorFlow tensor
-                    if hasattr(emb_tensor, 'numpy'):
-                        emb_array = emb_tensor.numpy()
-                    else:
-                        emb_array = np.array(emb_tensor)
-                    
-                    print(f"DEBUG: Embedding shape for {file_name}: {emb_array.shape}")
-                    
-                    # emb_array should have shape (num_frames, embedding_dim)
-                    if emb_array.ndim == 1:
-                        emb_array = emb_array.reshape(1, -1)
-                    elif emb_array.ndim > 2:
-                        emb_array = emb_array.reshape(-1, emb_array.shape[-1])
-                    
-                    # Get frame-wise predictions
-                    frame_logits = classifier_model(emb_array)
-                    frame_predictions = tf.sigmoid(frame_logits).numpy()
-                    
-                    print(f"DEBUG: Frame predictions shape: {frame_predictions.shape}")
-                    
-                    # Map frame predictions to clips
-                    # If we have more clips than frames, repeat predictions
-                    # If we have more frames than clips, average frames for each clip
-                    num_frames = frame_predictions.shape[0]
-                    
-                    if num_frames >= num_clips_for_file:
-                        # More frames than clips - average frames for each clip
-                        frames_per_clip = num_frames // num_clips_for_file
-                        for clip_idx in range(num_clips_for_file):
-                            start_frame = clip_idx * frames_per_clip
-                            end_frame = min((clip_idx + 1) * frames_per_clip, num_frames)
-                            clip_pred = np.mean(frame_predictions[start_frame:end_frame], axis=0)
-                            all_clip_predictions.append(clip_pred.tolist())
-                    else:
-                        # Fewer frames than clips - interpolate or repeat
-                        for clip_idx in range(num_clips_for_file):
-                            frame_idx = min(clip_idx * num_frames // num_clips_for_file, num_frames - 1)
-                            clip_pred = frame_predictions[frame_idx]
-                            all_clip_predictions.append(clip_pred.tolist())
+
+                # Memory management: Process in batches to prevent memory exhaustion
+                BATCH_SIZE = 100  # Process 100 files at a time
+                num_batches = (len(embeddings_list) + BATCH_SIZE - 1) // BATCH_SIZE
+                print(f"DEBUG: Processing {len(embeddings_list)} files in {num_batches} batches for memory safety")
+
+                # CRITICAL FIX: Use files_df to maintain correct file order
+                # The files_df was populated in the same order as embeddings during dataset building
+                # (see build_dataset_thread lines 312-333 where files are processed in order)
+                # Using group_by on clips_df could reorder files depending on:
+                # - Operating system file sorting differences (Windows vs Linux)
+                # - Database reload operations
+                # - File name alphabetical order vs. original processing order
+                # This ensures embeddings_list[i] always corresponds to files_df[i]
+                files_df = audio_db.get_files_df()
+                clips_df = audio_db.get_clips_df()
+
+                print(f"DEBUG: Processing {len(files_df)} files in database order (matches embedding order)")
+                if len(files_df) != len(embeddings_list):
+                    print(f"WARNING: File count mismatch - database has {len(files_df)} files but {len(embeddings_list)} embeddings")
+
+                # PERFORMANCE OPTIMIZATION: Use Polars partition_by for efficient grouping
+                print(f"DEBUG: files_df has {len(files_df)} rows")
+                print(f"DEBUG: clips_df has {len(clips_df)} rows")
+
+                # Sort clips once, then partition by file_id
+                print("DEBUG: Sorting and partitioning clips by file_id...")
+                sorted_clips = clips_df.sort(["file_id", "clip_start"])
+                clips_partitions = sorted_clips.partition_by("file_id", as_dict=True)
+
+                print(f"DEBUG: Partitioned into {len(clips_partitions)} file groups")
+
+                # Process files in batches for memory safety
+                for batch_idx in range(num_batches):
+                    batch_start = batch_idx * BATCH_SIZE
+                    batch_end = min(batch_start + BATCH_SIZE, len(files_df))
+                    print(f"DEBUG: Processing batch {batch_idx + 1}/{num_batches} (files {batch_start}-{batch_end-1})")
+
+                    # Process files in the order they appear in files_df (same as embeddings order)
+                    for file_idx in range(batch_start, batch_end):
+                        file_row = dict(zip(files_df.columns, files_df.row(file_idx)))
+                        if file_idx >= len(embeddings_list):
+                            print(f"WARNING: More files in database than embeddings available")
+                            break
+
+                        file_id = file_row['file_id']
+                        file_name = file_row['file_name']
+
+                        # Get clips for this file from partitioned dictionary - O(1) lookup!
+                        file_clips = clips_partitions.get((file_id,))  # partition_by returns tuple keys
+                        if file_clips is None or len(file_clips) == 0:
+                            print(f"WARNING: No clips found for file_id {file_id} ('{file_name}')")
+                            continue
+
+                        num_clips_for_file = len(file_clips)
+                        print(f"DEBUG: File {file_idx} '{file_name}' (ID: {file_id}) has {num_clips_for_file} clips")
+
+                        # Get embedding tensor for this file - now correctly aligned!
+                        emb_tensor = embeddings_list[file_idx]
+
+                        # Convert to numpy if it's a TensorFlow tensor
+                        if hasattr(emb_tensor, 'numpy'):
+                            emb_array = emb_tensor.numpy()
+                        else:
+                            emb_array = np.array(emb_tensor)
+
+                        print(f"DEBUG: Embedding shape for {file_name}: {emb_array.shape}")
+
+                        # emb_array should have shape (num_frames, embedding_dim)
+                        if emb_array.ndim == 1:
+                            emb_array = emb_array.reshape(1, -1)
+                        elif emb_array.ndim > 2:
+                            emb_array = emb_array.reshape(-1, emb_array.shape[-1])
+
+                        # Get frame-wise predictions
+                        frame_logits = classifier_model(emb_array)
+                        frame_predictions = tf.sigmoid(frame_logits).numpy()
+
+                        print(f"DEBUG: Frame predictions shape: {frame_predictions.shape}")
+
+                        # Map frame predictions to clips
+                        # If we have more clips than frames, repeat predictions
+                        # If we have more frames than clips, average frames for each clip
+                        num_frames = frame_predictions.shape[0]
+
+                        # Handle edge case: empty embeddings or no clips
+                        if num_frames == 0 or num_clips_for_file == 0:
+                            print(f"WARNING: File '{file_name}' has num_frames={num_frames}, num_clips={num_clips_for_file}. Skipping.")
+                            # Add neutral predictions for all clips of this file
+                            num_classes = frame_predictions.shape[1] if num_frames > 0 else app_state["audio_db"].num_classes
+                            neutral_pred = [0.5] * num_classes
+                            for _ in range(num_clips_for_file):
+                                all_clip_predictions.append(neutral_pred)
+                            continue
+
+                        if num_frames >= num_clips_for_file:
+                            # More frames than clips - average frames for each clip
+                            frames_per_clip = num_frames // num_clips_for_file
+                            for clip_idx in range(num_clips_for_file):
+                                start_frame = clip_idx * frames_per_clip
+                                end_frame = min((clip_idx + 1) * frames_per_clip, num_frames)
+                                clip_pred = np.mean(frame_predictions[start_frame:end_frame], axis=0)
+                                all_clip_predictions.append(clip_pred.tolist())
+                        else:
+                            # Fewer frames than clips - interpolate or repeat
+                            # This handles cases where we have more clips than frames
+                            for clip_idx in range(num_clips_for_file):
+                                if num_frames > 0:
+                                    frame_idx = min(clip_idx * num_frames // num_clips_for_file, num_frames - 1)
+                                    clip_pred = frame_predictions[frame_idx]
+                                    all_clip_predictions.append(clip_pred.tolist())
+                                else:
+                                    # No frames - use neutral prediction
+                                    print(f"WARNING: No frames available for clip {clip_idx} of file '{file_name}'")
+                                    num_classes = app_state["audio_db"].num_classes
+                                    all_clip_predictions.append([0.5] * num_classes)
+
+                    # Memory cleanup after each batch
+                    print(f"DEBUG: Batch {batch_idx + 1} complete. Running memory cleanup...")
+                    gc.collect()
+                    tf.keras.backend.clear_session()
                 
                 print(f"DEBUG: Generated {len(all_clip_predictions)} predictions for {total_clips} clips")
                 
@@ -1255,10 +1414,17 @@ async def load_classifier(classifier_path: str):
                 
                 # Populate multiclass predictions in database
                 app_state["audio_db"].populate_multiclass_predictions(all_clip_predictions)
-                
+
                 # Update scores for the first class (default)
                 app_state["audio_db"].update_class_scores_and_annotations(0)
                 app_state["current_class_index"] = 0
+
+                # Final memory cleanup after all predictions
+                print("DEBUG: All predictions complete. Final memory cleanup...")
+                del all_clip_predictions  # Delete large prediction list
+                gc.collect()
+                tf.keras.backend.clear_session()
+                print("DEBUG: Memory cleanup complete.")
                 
             except Exception as embed_error:
                 import traceback
@@ -1935,7 +2101,8 @@ def generate_spectrogram(request: SpectrogramRequest):
             request.fmin,
             request.fmax,
             request.bandpass_min,
-            request.bandpass_max
+            request.bandpass_max,
+            request.buffer_enabled
         )
 
         # Create cache directory if it doesn't exist
@@ -1953,13 +2120,18 @@ def generate_spectrogram(request: SpectrogramRequest):
                 image_data = base64.b64encode(f.read()).decode()
 
             # Calculate metadata (lightweight operation)
-            buffer_s = 1.0
-            buffered_start = max(0, request.clip_start - buffer_s)
-
             import soundfile as sf
             f = sf.SoundFile(request.file_path)
             file_duration = f.frames / f.samplerate
-            buffered_end = min(file_duration, request.clip_end + buffer_s)
+
+            # Conditionally apply buffer based on request
+            if request.buffer_enabled:
+                buffer_s = 1.0
+                buffered_start = max(0, request.clip_start - buffer_s)
+                buffered_end = min(file_duration, request.clip_end + buffer_s)
+            else:
+                buffered_start = request.clip_start
+                buffered_end = request.clip_end
 
             # Set frequency range from request or defaults
             fmin = request.fmin if request.fmin is not None else cfg.MIN_FREQ
@@ -2009,7 +2181,8 @@ def generate_spectrogram(request: SpectrogramRequest):
             fmin=request.fmin,
             fmax=request.fmax,
             bandpass_min=request.bandpass_min,
-            bandpass_max=request.bandpass_max
+            bandpass_max=request.bandpass_max,
+            buffer_enabled=request.buffer_enabled
         )
 
         # Extract just the base64 data (without the data:image/png;base64, prefix)
@@ -2901,7 +3074,7 @@ def training_thread(config: ModelTrainingConfig):
             use_label_strength = True
             
             # Generate embeddings for the labeled files
-            embeddings = u.load_and_preprocess(file_paths)
+            embeddings, valid_files, failed_files = u.load_and_preprocess(file_paths)
             
         except (ValueError, KeyError) as e:
             # Fallback to legacy loading if enhanced loading fails
@@ -2910,7 +3083,7 @@ def training_thread(config: ModelTrainingConfig):
             use_label_strength = False
             
             # Generate embeddings for training files
-            embeddings = u.load_and_preprocess(files)
+            embeddings, valid_files, failed_files = u.load_and_preprocess(files)
             
             # Extract labels from filenames (legacy method)
             labels = []
@@ -2984,7 +3157,7 @@ def training_thread(config: ModelTrainingConfig):
                 print(f"Using enhanced test data loading with strength information")
                 
                 # Generate embeddings for the labeled test files
-                test_embeddings = u.load_and_preprocess(test_file_paths)
+                test_embeddings, test_valid_files, test_failed_files = u.load_and_preprocess(test_file_paths)
                 strength_test = test_label_strengths
                 
             except (ValueError, KeyError) as e:
@@ -2993,7 +3166,7 @@ def training_thread(config: ModelTrainingConfig):
                 print("Falling back to legacy test label extraction")
                 
                 # Generate embeddings for test files
-                test_embeddings = u.load_and_preprocess(test_files)
+                test_embeddings, test_valid_files, test_failed_files = u.load_and_preprocess(test_files)
                 
                 # Extract labels for test files (legacy method)
                 test_labels = []
@@ -3075,7 +3248,16 @@ def training_thread(config: ModelTrainingConfig):
         # Model is already saved to the correct location by fit_w_tape
         actual_model_path = full_save_path
         training_state["logs"].append(f"Model saved to: {actual_model_path}")
-        
+
+        # Memory cleanup after training
+        training_state["logs"].append("Running memory cleanup...")
+        del X_train, X_test, y_train, y_test, embeddings_array
+        if 'test_embeddings' in locals():
+            del test_embeddings
+        gc.collect()
+        tf.keras.backend.clear_session()
+        training_state["logs"].append("Memory cleanup complete")
+
         # Training completed successfully
         training_state["status"] = "completed"
         training_state["message"] = "Model training completed successfully"
@@ -3169,30 +3351,34 @@ async def preview_training_data(training_audio_folder: str, metadata_path: str):
         metadata_path = Path(metadata_path)
         if not metadata_path.exists():
             raise HTTPException(status_code=400, detail="Metadata file not found")
-            
+
         with open(metadata_path, "r") as f:
             metadata = json.load(f)
-        
+
         class_map = metadata.get("class_map", {})
         backend_model = metadata.get("dataset_info", {}).get("backend_model", "PERCH")
-        
+
+        # Set backend configuration for embedding generation
+        os.environ["BACKEND"] = backend_model
+
         # Find training audio files
         audio_folder = Path(training_audio_folder)
         if not audio_folder.exists():
             raise HTTPException(status_code=400, detail="Training audio folder not found")
-        
+
         files = list(audio_folder.glob("**/*.wav"))
         files.extend(list(audio_folder.glob("**/*.mp3")))
         files.extend(list(audio_folder.glob("**/*.WAV")))
         files.extend(list(audio_folder.glob("**/*.MP3")))
         files = [str(f) for f in files]
-        
+
         if not files:
             raise HTTPException(status_code=400, detail="No audio files found in training folder")
-        
+
         # Check if this is an exported dataset with enhanced metadata
         preview_data = []
         use_label_strength = False
+        embedding_shape = None
         
         try:
             print(f"DEBUG: Attempting enhanced loading for {len(files)} files")
@@ -3268,7 +3454,28 @@ async def preview_training_data(training_audio_folder: str, metadata_path: str):
                     "raw_label_vector": file_label.tolist() if file_label is not None else None,
                     "raw_strength_vector": None  # Not available in legacy mode
                 })
-        
+
+        # Load a sample of embeddings to get shape information
+        # Use only 1-3 files to avoid long processing time
+        sample_files = files[:min(3, len(files))]
+        try:
+            print(f"DEBUG: Loading {len(sample_files)} sample embeddings to determine shape")
+            sample_embeddings, sample_valid_files, sample_failed_files = u.load_and_preprocess(sample_files)
+            sample_embeddings_array = np.array(sample_embeddings).squeeze()
+            embedding_shape = sample_embeddings_array.shape
+            print(f"DEBUG: Embedding shape: {embedding_shape}")
+
+            # If single sample, shape will be (embedding_dim,), we want to report (n_samples, embedding_dim)
+            if len(sample_files) == 1:
+                embedding_shape = (len(files), embedding_shape[0] if len(embedding_shape) > 0 else embedding_shape)
+            else:
+                # Multiple samples, shape is (n_samples, embedding_dim)
+                # Replace n_samples with total file count
+                embedding_shape = (len(files), embedding_shape[1] if len(embedding_shape) > 1 else embedding_shape[0])
+        except Exception as e:
+            print(f"WARNING: Could not load embeddings for shape detection: {e}")
+            embedding_shape = None
+
         return {
             "status": "success",
             "data": {
@@ -3276,6 +3483,7 @@ async def preview_training_data(training_audio_folder: str, metadata_path: str):
                 "class_map": class_map,
                 "backend_model": backend_model,
                 "use_label_strength": use_label_strength,
+                "embedding_shape": embedding_shape,
                 "files": preview_data[:100]  # Limit to first 100 for performance
             }
         }
@@ -3311,9 +3519,10 @@ async def load_validation_predictions(request: Request):
             print("DEBUG: Initializing validation database")
             app_state["validation_db"] = vdb.ValidationDB()
         elif replace_existing:
-            # Reuse existing instance, but wait for pending saves
+            # Reuse existing instance, wait for pending saves, and clear all data
             print("DEBUG: Reusing validation database instance, clearing data")
             app_state["validation_db"].wait_for_pending_save()
+            app_state["validation_db"].clear_data()
 
         validation_db = app_state["validation_db"]
 
@@ -3379,9 +3588,10 @@ async def load_unvalidated_clips(request: Request):
             print("DEBUG: Initializing validation database")
             app_state["validation_db"] = vdb.ValidationDB()
         elif replace_existing:
-            # Reuse existing instance, but wait for pending saves and clear data
+            # Reuse existing instance, wait for pending saves, and clear all data
             print("DEBUG: Reusing validation database instance, clearing data")
             app_state["validation_db"].wait_for_pending_save()
+            app_state["validation_db"].clear_data()
 
         validation_db = app_state["validation_db"]
 

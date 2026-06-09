@@ -125,7 +125,8 @@ const ValidationInterface = ({ isActive = true }) => {
     fmin: null,  // null means use model default
     fmax: null,  // null means use model default
     bandpass_min: null,
-    bandpass_max: null
+    bandpass_max: null,
+    buffer_enabled: true  // add 1-second buffer by default
   });
 
   // Hotkeys
@@ -361,13 +362,28 @@ const ValidationInterface = ({ isActive = true }) => {
     }
   };
 
-  const saveAudio = () => {
+  const saveAudio = async () => {
     if (!currentClip) return;
-    const audioUrl = `/api/audio/${currentClip.audio_file_path}?clip_start=${currentClip.start_time || 0}&clip_end=${currentClip.end_time || 0}`;
-    const link = document.createElement('a');
-    link.href = audioUrl;
-    link.download = `audio_${currentClip.clip_id || 'clip'}.wav`;
-    link.click();
+
+    try {
+      // Fetch the audio as a blob
+      const audioUrl = `/api/audio/${currentClip.audio_file_path}?clip_start=${currentClip.start_time || 0}&clip_end=${currentClip.end_time || 0}`;
+      const response = await axios.get(audioUrl, { responseType: 'blob' });
+
+      // Create a blob URL and download link
+      const blob = new Blob([response.data], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `audio_${currentClip.clip_id || 'clip'}.wav`;
+      link.click();
+
+      // Clean up the blob URL
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to save audio:', error);
+      toast.error('Failed to save audio clip');
+    }
   };
 
   const toggleStrataCompletion = async (isCompleted) => {
@@ -1075,7 +1091,8 @@ const ValidationInterface = ({ isActive = true }) => {
                             fmin: null,
                             fmax: null,
                             bandpass_min: null,
-                            bandpass_max: null
+                            bandpass_max: null,
+                            buffer_enabled: true
                           })}
                           modelDefaults={{
                             MIN_FREQ: 60,

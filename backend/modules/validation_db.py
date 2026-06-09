@@ -102,6 +102,82 @@ class ValidationDB:
             }
         )
 
+    def clear_data(self):
+        """
+        Clear all data from the validation database.
+        Thread-safe operation that resets all dataframes to empty state.
+        Called when loading a new dataset with replace_existing=True.
+        """
+        with self._save_lock:
+            print("INFO: Clearing validation database data")
+
+            # Clear predictions table
+            self.predictions_df = pl.DataFrame(
+                schema={
+                    'prediction_id': pl.Utf8,
+                    'filename': pl.Utf8,
+                    'start_time': pl.Float32,
+                    'end_time': pl.Float32,
+                    'species_name': pl.Utf8,
+                    'confidence': pl.Float32,
+                    'model_name': pl.Utf8,
+                    'audio_file_path': pl.Utf8,
+                    'strata_id': pl.Utf8,
+                    'strata': pl.Utf8,
+                    'created_at': pl.Datetime
+                }
+            )
+
+            # Clear validation annotations table
+            self.validation_annotations_df = pl.DataFrame(
+                schema={
+                    'annotation_id': pl.Utf8,
+                    'prediction_id': pl.Utf8,
+                    'filename': pl.Utf8,
+                    'start_time': pl.Float32,
+                    'end_time': pl.Float32,
+                    'species_name': pl.Utf8,
+                    'original_confidence': pl.Float32,
+                    'validation_state': pl.Utf8,
+                    'validation_confidence': pl.Int32,
+                    'annotator_id': pl.Utf8,
+                    'validated_at': pl.Datetime,
+                    'strata_id': pl.Utf8,
+                    'notes': pl.Utf8
+                }
+            )
+
+            # Clear strata definitions table
+            self.strata_definitions_df = pl.DataFrame(
+                schema={
+                    'strata_id': pl.Utf8,
+                    'strata_name': pl.Utf8,
+                    'strata_type': pl.Utf8,
+                    'confidence_threshold': pl.Float32,
+                    'created_at': pl.Datetime
+                }
+            )
+
+            # Clear validation progress table
+            self.validation_progress_df = pl.DataFrame(
+                schema={
+                    'strata_id': pl.Utf8,
+                    'strata_name': pl.Utf8,
+                    'species_name': pl.Utf8,
+                    'total_clips': pl.Int32,
+                    'validated_clips': pl.Int32,
+                    'confirmed_clips': pl.Int32,
+                    'rejected_clips': pl.Int32,
+                    'uncertain_clips': pl.Int32,
+                    'skipped_clips': pl.Int32,
+                    'target_confirmations': pl.Int32,
+                    'is_completed': pl.Boolean,
+                    'last_updated': pl.Datetime
+                }
+            )
+
+            print("INFO: Validation database cleared successfully")
+
     def acquire_lock(self):
         """Acquire the database lock for thread-safe operations."""
         self._save_lock.acquire()

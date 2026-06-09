@@ -325,14 +325,25 @@ const ModelTraining = ({ isActive = true }) => {
           </AccordionSummary>
           <AccordionDetails>
             <Grid container spacing={2} sx={{ mb: 2 }}>
-              <Grid item xs={12} md={6}>
+              <Grid item xs={12} md={4}>
                 <Typography variant="subtitle2" gutterBottom color="text.secondary">Configuration</Typography>
                 <Stack direction="row" spacing={2} sx={{ mb: 1 }}>
                     <Chip size="small" label={`Model: ${previewData.backend_model}`} />
                     <Chip size="small" label={previewData.use_label_strength ? 'Strength Labels: ON' : 'Strength Labels: OFF'} color={previewData.use_label_strength ? "primary" : "default"} />
                 </Stack>
               </Grid>
-              <Grid item xs={12} md={6}>
+              <Grid item xs={12} md={4}>
+                <Typography variant="subtitle2" gutterBottom color="text.secondary">Embeddings Shape</Typography>
+                <Box sx={{ fontFamily: 'monospace', fontSize: '0.875rem', color: 'primary.main', fontWeight: 600 }}>
+                  {previewData.embedding_shape ? `(${previewData.embedding_shape[0]}, ${previewData.embedding_shape[1]})` : 'Loading...'}
+                </Box>
+                {previewData.embedding_shape && (
+                  <Typography variant="caption" color="text.secondary">
+                    {previewData.embedding_shape[0]} samples × {previewData.embedding_shape[1]} features
+                  </Typography>
+                )}
+              </Grid>
+              <Grid item xs={12} md={4}>
                 <Typography variant="subtitle2" gutterBottom color="text.secondary">Classes</Typography>
                 <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
                   {Object.keys(previewData.class_map).map(className => (

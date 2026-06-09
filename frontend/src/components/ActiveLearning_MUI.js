@@ -89,7 +89,8 @@ const ActiveLearning = ({ isActive = true }) => {
     fmin: null,  // null means use model default
     fmax: null,  // null means use model default
     bandpass_min: null,
-    bandpass_max: null
+    bandpass_max: null,
+    buffer_enabled: true  // add 1-second buffer by default
   });
 
   const colorModeOptions = [
@@ -719,13 +720,28 @@ const ActiveLearning = ({ isActive = true }) => {
     }
   };
 
-  const saveAudio = () => {
+  const saveAudio = async () => {
     if (!currentClip) return;
-    const audioUrl = `/api/audio/${encodeURIComponent(currentClip.file_path)}?clip_start=${currentClip.clip_start}&clip_end=${currentClip.clip_end}`;
-    const link = document.createElement('a');
-    link.href = audioUrl;
-    link.download = `audio_${currentClip.clip_id || 'clip'}.wav`;
-    link.click();
+
+    try {
+      // Fetch the audio as a blob
+      const audioUrl = `/api/audio/${encodeURIComponent(currentClip.file_path)}?clip_start=${currentClip.clip_start}&clip_end=${currentClip.clip_end}`;
+      const response = await axios.get(audioUrl, { responseType: 'blob' });
+
+      // Create a blob URL and download link
+      const blob = new Blob([response.data], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `audio_${currentClip.clip_id || 'clip'}.wav`;
+      link.click();
+
+      // Clean up the blob URL
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to save audio:', error);
+      toast.error('Failed to save audio clip');
+    }
   };
 
   // Effects - Reload spectrogram when options change
@@ -1229,7 +1245,8 @@ const ActiveLearning = ({ isActive = true }) => {
                     fmin: null,
                     fmax: null,
                     bandpass_min: null,
-                    bandpass_max: null
+                    bandpass_max: null,
+                    buffer_enabled: true
                   })}
                   modelDefaults={{
                     MIN_FREQ: datasetMetadata?.min_freq || 60,

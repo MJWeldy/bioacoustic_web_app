@@ -55,7 +55,8 @@ def create_spectrogram_with_options(
     fmin: Optional[float] = None,
     fmax: Optional[float] = None,
     bandpass_min: Optional[float] = None,
-    bandpass_max: Optional[float] = None
+    bandpass_max: Optional[float] = None,
+    buffer_enabled: bool = True
 ) -> Tuple[str, Dict]:
     """
     Create spectrogram with customizable options and return base64 image plus metadata.
@@ -74,21 +75,24 @@ def create_spectrogram_with_options(
         fmax: Maximum frequency (Hz) - if None, uses model default MAX_FREQ
         bandpass_min: Bandpass filter minimum frequency (Hz) - if None, no bandpass filtering
         bandpass_max: Bandpass filter maximum frequency (Hz) - if None, no bandpass filtering
+        buffer_enabled: Add 1-second buffer on each side for context - if False, uses exact clip bounds
 
     Returns:
         Tuple of (base64 encoded PNG image, metadata dictionary)
     """
-    # Add buffer of up to 1 second on each side
-    buffer_samples = 32000
-    buffer_s = buffer_samples / cfg.TARGET_SR
-
     # Load the full audio file info
     f = sf.SoundFile(audio_path)
     file_duration = f.frames / f.samplerate
 
-    # Calculate buffered indices
-    buffered_start = max(0, clip_start - buffer_s)
-    buffered_end = min(file_duration, clip_end + buffer_s)
+    # Conditionally add buffer based on buffer_enabled parameter
+    if buffer_enabled:
+        buffer_samples = 32000
+        buffer_s = buffer_samples / cfg.TARGET_SR
+        buffered_start = max(0, clip_start - buffer_s)
+        buffered_end = min(file_duration, clip_end + buffer_s)
+    else:
+        buffered_start = clip_start
+        buffered_end = clip_end
 
     # Extract the buffered audio segment
     y_buffered = u.load_audio(audio_path, (buffered_start, buffered_end, f.samplerate))

@@ -1,5 +1,6 @@
 import numpy as np
 import tensorflow as tf
+import gc
 
 from sklearn.metrics import (
     roc_curve,
@@ -339,6 +340,10 @@ def fit_w_tape(
                         optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
                         lr_wait = 0
 
+        # Periodic memory cleanup every 100 steps
+        if step > 0 and step % 100 == 0:
+            gc.collect()
+
         # Check early stopping condition
         if enable_early_stopping and (wait >= patience or learning_rate < 0.00001):
             if verbose:
@@ -353,4 +358,9 @@ def fit_w_tape(
         print(f"Test Data Loss of best fit: {best:.4f}")
     else:
         print(f"Macro cMAP of best fit: {best:.4f}")
+
+    # Final memory cleanup after training
+    gc.collect()
+    tf.keras.backend.clear_session()
+
     return classifier_model, train_losses, val_losses, cmaps, aucs, geomeans

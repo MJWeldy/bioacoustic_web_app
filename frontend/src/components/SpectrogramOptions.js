@@ -367,6 +367,32 @@ const SpectrogramOptions = ({
                 </Stack>
               </OptionSection>
 
+              {/* Context Buffer */}
+              <OptionSection
+                icon={<SettingsIcon sx={{ fontSize: 16, color: '#4caf50' }} />}
+                title="Context Buffer"
+                bgcolor={options.buffer_enabled === false ? alpha('#4caf50', 0.04) : alpha('#000', 0.02)}
+              >
+                <FormControlLabel
+                  sx={{ m: 0 }}
+                  control={
+                    <Switch
+                      checked={options.buffer_enabled !== false}
+                      onChange={(e) => handleOptionChange('buffer_enabled', e.target.checked)}
+                      size="small"
+                    />
+                  }
+                  label={
+                    <Typography variant="caption" sx={{ fontWeight: 500, fontSize: '0.75rem' }}>
+                      Add 1-second buffer around clip for context
+                    </Typography>
+                  }
+                />
+                <Typography variant="caption" sx={{ display: 'block', mt: 0.5, fontSize: '0.65rem', color: 'text.secondary', fontStyle: 'italic' }}>
+                  Disable for cleaner exports without surrounding audio
+                </Typography>
+              </OptionSection>
+
             </Stack>
           </Box>
         </Collapse>
