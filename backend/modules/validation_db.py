@@ -753,7 +753,13 @@ class ValidationDB:
         return df_long
 
     def _link_audio_files(self, filenames: List[str], audio_directory: str) -> List[str]:
-        """Link audio files to predictions by finding matching files."""
+        """Link audio files to predictions by finding matching files.
+
+        Matching is tolerant of common prediction-file quirks: filename
+        columns that contain full or relative paths (Windows or Unix
+        separators), case differences, and mismatched audio extensions
+        (matched by stem as a fallback).
+        """
         audio_paths = []
         audio_dir_path = Path(audio_directory)
 
@@ -761,21 +767,31 @@ class ValidationDB:
             print(f"Warning: Audio directory {audio_directory} not found")
             return [''] * len(filenames)
 
-        # Create a mapping of base filenames to full paths
-        audio_files = {}
+        # Map lowercase basenames and stems to full paths
+        files_by_name = {}
+        files_by_stem = {}
         for audio_file in audio_dir_path.rglob('*'):
             if audio_file.suffix.lower() in ['.wav', '.mp3', '.flac', '.aiff', '.m4a']:
-                audio_files[audio_file.name] = str(audio_file)
+                files_by_name.setdefault(audio_file.name.lower(), str(audio_file))
+                files_by_stem.setdefault(audio_file.stem.lower(), str(audio_file))
 
         # Match filenames to audio files
+        unmatched_samples = []
         for filename in filenames:
-            if filename in audio_files:
-                audio_paths.append(audio_files[filename])
-            else:
-                audio_paths.append('')
+            # Strip any directory components (handles both / and \ separators)
+            basename = str(filename).replace('\\', '/').split('/')[-1].strip().lower()
+            stem = Path(basename).stem
+            matched = files_by_name.get(basename) or files_by_stem.get(stem, '')
+            audio_paths.append(matched)
+            if not matched and len(unmatched_samples) < 5:
+                unmatched_samples.append(filename)
 
         linked_count = sum(1 for path in audio_paths if path)
         print(f"DEBUG: Linked {linked_count}/{len(filenames)} audio files")
+        if unmatched_samples:
+            print(f"WARNING: Example unmatched filenames: {unmatched_samples}")
+            sample_files = list(files_by_name.values())[:5]
+            print(f"WARNING: Example files found in audio directory: {sample_files}")
 
         return audio_paths
 

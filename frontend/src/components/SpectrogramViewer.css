@@ -104,6 +104,15 @@
   letter-spacing: 0.05em;
 }
 
+.loading-text.error-text {
+  color: #dc2626;
+  text-transform: none;
+  letter-spacing: normal;
+  max-width: 80%;
+  text-align: center;
+  line-height: 1.5;
+}
+
 /* Main Container */
 .spectrogram-container {
   display: grid;

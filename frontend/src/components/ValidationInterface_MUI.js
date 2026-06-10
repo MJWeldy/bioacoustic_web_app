@@ -105,6 +105,7 @@ const ValidationInterface = ({ isActive = true }) => {
   // Spectrogram
   const [spectrogramUrl, setSpectrogramUrl] = useState(null);
   const [spectrogramMetadata, setSpectrogramMetadata] = useState(null);
+  const [spectrogramError, setSpectrogramError] = useState(null);
   const [colorMode, setColorMode] = useState('viridis');
 
   // Clip labels (for showing other confirmed labels)
@@ -437,7 +438,12 @@ const ValidationInterface = ({ isActive = true }) => {
   };
 
   const loadAudio = (clipData) => {
-    if (!clipData || !clipData.audio_file_path) return;
+    if (!clipData) return;
+    if (!clipData.audio_file_path) {
+      // No audio file was linked to this prediction during dataset loading.
+      // The spectrogram guard shows the toast; just skip audio quietly here.
+      return;
+    }
 
     // Slight delay to ensure DOM is ready if this is the first clip
     // This handles the "audioRef is null" issue on initial load
@@ -466,8 +472,19 @@ const ValidationInterface = ({ isActive = true }) => {
   };
 
   const loadSpectrogram = async (clipData) => {
-    if (!clipData || !clipData.audio_file_path) return;
+    if (!clipData) return;
     setSpectrogramUrl(null); // Clear previous
+    setSpectrogramError(null);
+
+    if (!clipData.audio_file_path) {
+        // Audio linking failed during dataset loading (wrong/missing audio
+        // directory, or CSV filenames don't match files on disk).
+        const msg = "No audio file linked to this clip. Check the Audio Directory in the Validation Dataset Builder and reload the dataset.";
+        console.error("Spectrogram: clip has empty audio_file_path", clipData);
+        setSpectrogramError(msg);
+        toast.error(msg, { toastId: 'no-audio-path' });
+        return;
+    }
 
     try {
         const specRes = await axios.post('/api/spectrogram', {
@@ -483,19 +500,23 @@ const ValidationInterface = ({ isActive = true }) => {
             setSpectrogramMetadata(specRes.data.metadata || null);
         } else {
             console.error("Spectrogram: No spectrogram data in response");
+            setSpectrogramError("Failed to generate spectrogram - no data returned");
             toast.error("Failed to generate spectrogram - no data returned");
         }
     } catch (e) {
         console.error("Spectrogram error", e);
+        let msg;
         if (e.code === 'ECONNABORTED') {
-            toast.error("Spectrogram generation timed out (>30s). File may be too large or corrupted.");
+            msg = "Spectrogram generation timed out (>30s). File may be too large or corrupted.";
         } else if (e.response?.status === 500) {
-            toast.error(`Spectrogram error: ${e.response?.data?.detail || 'Unknown error'}`);
+            msg = `Spectrogram error: ${e.response?.data?.detail || 'Unknown error'}`;
         } else if (e.response?.status === 404) {
-            toast.error("Audio file not found - check file path");
+            msg = "Audio file not found - check file path";
         } else {
-            toast.error("Failed to load spectrogram - check console for details");
+            msg = "Failed to load spectrogram - check console for details";
         }
+        setSpectrogramError(msg);
+        toast.error(msg);
     }
   };
 
@@ -1148,6 +1169,7 @@ const ValidationInterface = ({ isActive = true }) => {
                                 audioCurrentTime={audioCurrentTime}
                                 clipDuration={currentClip ? currentClip.end_time - currentClip.start_time : 0}
                                 isLoading={!spectrogramUrl}
+                                error={spectrogramError}
                                 showMetadata={false}
                             />
                         </Box>

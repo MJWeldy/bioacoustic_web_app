@@ -4725,6 +4725,20 @@ async def validation_diagnostic():
         unique_strata_ids = validation_db.predictions_df["strata_id"].unique().to_list() if total_predictions > 0 else []
         unique_species = validation_db.predictions_df["species_name"].unique().to_list() if total_predictions > 0 else []
 
+        # Audio linking stats - empty audio_file_path means spectrograms/audio cannot load
+        if total_predictions > 0:
+            audio_files_linked = validation_db.predictions_df.filter(
+                pl.col("audio_file_path").is_not_null() & (pl.col("audio_file_path") != "")
+            ).height
+        else:
+            audio_files_linked = 0
+        audio_files_unlinked = total_predictions - audio_files_linked
+        unlinked_sample = []
+        if audio_files_unlinked > 0:
+            unlinked_sample = validation_db.predictions_df.filter(
+                pl.col("audio_file_path").is_null() | (pl.col("audio_file_path") == "")
+            )["filename"].unique().to_list()[:10]
+
         # Get strata details
         strata_details = []
         for strata_row in validation_db.strata_definitions_df.iter_rows(named=True):
@@ -4763,6 +4777,9 @@ async def validation_diagnostic():
             "total_predictions": total_predictions,
             "total_annotations": total_annotations,
             "total_strata": total_strata,
+            "audio_files_linked": audio_files_linked,
+            "audio_files_unlinked": audio_files_unlinked,
+            "unlinked_filenames_sample": unlinked_sample,
             "unique_strata_ids": unique_strata_ids[:10],  # First 10
             "unique_species": unique_species[:20],  # First 20
             "strata_details": strata_details

@@ -125,10 +125,15 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
           setIsLoading(false);
           return;
         }
+        if (!predictionAudioDirectory || !predictionAudioDirectory.trim()) {
+          toast.error('Please specify an audio directory - without it, spectrograms and audio cannot load during validation');
+          setIsLoading(false);
+          return;
+        }
 
         response = await axios.post('/api/validation/load-predictions', {
           predictions_path: predictionsFile,
-          audio_directory: predictionAudioDirectory || null,
+          audio_directory: predictionAudioDirectory.trim(),
           model_name: modelName,
           format_type: formatType,
           recursive: recursive,
@@ -140,6 +145,18 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
         setLoadSummary(response.data);
         const itemCount = response.data.total_predictions || response.data.total_clips || 0;
         toast.success(`Loaded ${itemCount} items successfully`);
+
+        // Warn if predictions could not be linked to audio files - without
+        // links, the Validation tab cannot load spectrograms or audio
+        if (response.data.audio_files_linked !== undefined) {
+          const linked = response.data.audio_files_linked;
+          const total = response.data.total_predictions || 0;
+          if (linked === 0 && total > 0) {
+            toast.error('⚠️ 0 audio files linked! Spectrograms and audio will NOT load in the Validation tab. Check that the Audio Directory is correct and that filenames in the predictions file match the audio files on disk.', { autoClose: false });
+          } else if (linked < total) {
+            toast.warning(`⚠️ Only ${linked} of ${total} predictions were linked to audio files. Unlinked clips will not show spectrograms or audio.`, { autoClose: 10000 });
+          }
+        }
 
         // Show warning about unmapped files if any
         if (response.data.unmapped_files && response.data.unmapped_files > 0) {
@@ -566,8 +583,10 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
               <Grid item xs={12} md={6}>
                 <TextField
                   fullWidth size="small"
-                  label="Audio Files Directory (Optional)"
+                  required
+                  label="Audio Files Directory"
                   placeholder="/path/to/audio/files"
+                  helperText="Required - spectrograms and audio cannot load without it"
                   value={predictionAudioDirectory}
                   onChange={(e) => setPredictionAudioDirectory(e.target.value)}
                   disabled={isLoading}
@@ -640,6 +659,14 @@ const ValidationDatasetBuilder = ({ isActive = true }) => {
                         <Typography variant="body2"><strong>Total Predictions:</strong> {loadSummary.total_predictions}</Typography>
                         <Typography variant="body2"><strong>Unique Files:</strong> {loadSummary.unique_files}</Typography>
                         <Typography variant="body2"><strong>Format:</strong> {loadSummary.format_detected}</Typography>
+                        {loadSummary.audio_files_linked !== undefined && (
+                            <Typography
+                                variant="body2"
+                                sx={{ color: loadSummary.audio_files_linked === 0 ? 'error.main' : (loadSummary.audio_files_linked < loadSummary.total_predictions ? 'warning.main' : 'success.main') }}
+                            >
+                                <strong>Audio Files Linked:</strong> {loadSummary.audio_files_linked} / {loadSummary.total_predictions}
+                            </Typography>
+                        )}
                         {strataSummary && <Typography variant="body2"><strong>Validation Strata:</strong> {strataSummary.strata_created}</Typography>}
                     </Stack>
                 </Grid>

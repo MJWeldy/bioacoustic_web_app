@@ -160,9 +160,20 @@ const SpectrogramViewer = ({
   audioCurrentTime,
   clipDuration,
   isLoading = false,
+  error = null,
   showMetadata = true,
   className = ''
 }) => {
+  if (error) {
+    return (
+      <div className={`spectrogram-viewer loading ${className}`}>
+        <div className="loading-content">
+          <div className="loading-text error-text">⚠️ {error}</div>
+        </div>
+      </div>
+    );
+  }
+
   if (isLoading || !spectrogramUrl) {
     return (
       <div className={`spectrogram-viewer loading ${className}`}>
